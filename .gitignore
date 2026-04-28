@@ -1,0 +1,17 @@
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.env
+workspace/
+artifacts/
+logs/
+downloads/
+temp_extract/
+node_modules/
+batch.log
+src/*.egg-info/
+src/**/__pycache__/
+docs/internal_report_*/
+docs/progress_report_*/
+docs/repro_manual_*/

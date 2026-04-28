@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "maxwell-agent-project"
+version = "0.1.0"
+description = "Local Maxwell 2D agent scaffold with a Codexa cloud LLM backend."
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+  "openai>=2.32.0",
+  "pyaedt>=0.26.2",
+  "pydantic>=2.12.5",
+  "pydantic-settings>=2.13.1",
+  "python-dotenv>=1.2.2",
+  "rich>=15.0.0",
+]
+
+[project.scripts]
+maxwell-agent = "maxwell_agent.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
