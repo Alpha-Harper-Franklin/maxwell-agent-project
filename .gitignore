@@ -15,3 +15,8 @@ src/**/__pycache__/
 docs/internal_report_*/
 docs/progress_report_*/
 docs/repro_manual_*/
+*.aux
+*.log
+*.out
+*.toc
+*.synctex.gz
