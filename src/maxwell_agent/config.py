@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 import sys
 
-from pydantic import field_validator
+from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -17,7 +17,7 @@ class Settings(BaseSettings):
         extra="ignore",
     )
 
-    project_root: Path = DEFAULT_PROJECT_ROOT
+    project_root: Path = Field(default=DEFAULT_PROJECT_ROOT, validation_alias="PROJECT_ROOT")
     codexa_base_url: str = "https://codexa.leizhen.cloud/v1"
     codexa_api_key: str | None = None
     codexa_model: str = "gpt-5.4"
@@ -69,6 +69,17 @@ class Settings(BaseSettings):
         return self.project_root / "logs"
 
     @property
+    def knowledge_dir(self) -> Path:
+        return self.project_root / "knowledge"
+
+    @property
+    def primitive_library_path(self) -> Path:
+        root_level = self.project_root / "primitive_library.json"
+        if root_level.exists():
+            return root_level
+        return self.knowledge_dir / "primitive_library.json"
+
+    @property
     def runtime_python(self) -> Path:
         venv_python = self.project_root / ".venv" / "Scripts" / "python.exe"
         if venv_python.exists():
@@ -76,5 +87,5 @@ class Settings(BaseSettings):
         return Path(sys.executable)
 
     def ensure_dirs(self) -> None:
-        for path in (self.project_root, self.workspace_dir, self.artifacts_dir, self.logs_dir):
+        for path in (self.project_root, self.workspace_dir, self.artifacts_dir, self.logs_dir, self.knowledge_dir):
             path.mkdir(parents=True, exist_ok=True)

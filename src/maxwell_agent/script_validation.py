@@ -9,6 +9,7 @@ ALLOWED_IMPORT_ROOTS = {
     "__future__",
     "json",
     "math",
+    "re",
     "typing",
     "pathlib",
     "ansys",

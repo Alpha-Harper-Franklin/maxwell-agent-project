@@ -6,7 +6,7 @@ from datetime import datetime
 from pathlib import Path
 
 from .config import Settings
-from .errors import RequirementPlanningError
+from .errors import RequirementPlanningError, UnknownPrimitiveError
 from .llm_client import CodexaLLMClient
 from .maxwell_env import detect_maxwell_environment
 from .maxwell_executor import MaxwellExecutor
@@ -19,6 +19,7 @@ from .models import (
     ScriptStaticCheck,
     SimulationResult,
 )
+from .semantics import infer_builder_hint, intake_has_generic_object_graph
 from .script_validation import static_check_generated_script
 
 
@@ -95,6 +96,55 @@ class MaxwellAgent:
                     attempt_seed=feedback_round * 10,
                     seed_script=reusable_script,
                 )
+            except UnknownPrimitiveError as exc:
+                if progress_callback:
+                    progress_callback(24, f"检测到未知二维原语 {exc.primitive_token}，正在请求 AI 学习并加入本地原语库")
+                try:
+                    artifact = self._learn_primitive_with_repair(
+                        requirement=requirement,
+                        intake=current_intake,
+                        primitive_token=exc.primitive_token,
+                        raw_object=exc.raw_object,
+                        error_details=exc.message,
+                    )
+                    self._llm.primitive_library.register(artifact.template, persist=False, mark_persisted=False)
+                    all_artifacts.append(
+                        self._persist_json_artifact(
+                            run_dir / f"learned_primitive_{artifact.template.primitive_key}.json",
+                            artifact.model_dump(mode="json"),
+                        )
+                    )
+                    result, reusable_script = self._execute_for_intake(
+                        requirement=requirement,
+                        intake=current_intake,
+                        run_dir=run_dir,
+                        progress_callback=progress_callback,
+                        attempt_seed=feedback_round * 10,
+                        seed_script=reusable_script,
+                    )
+                    if result.status == "completed" and reusable_script.primitive_library_updates:
+                        committed_templates = []
+                        for item in reusable_script.primitive_library_updates:
+                            if not isinstance(item, dict):
+                                continue
+                            primitive_key = str(item.get("primitive_key") or "").strip()
+                            template = self._llm.primitive_library.find(primitive_key)
+                            if template is not None:
+                                committed_templates.append(template)
+                        if committed_templates:
+                            self._llm.primitive_library.commit(committed_templates)
+                except RequirementPlanningError as learn_exc:
+                    return self._build_blocked_result(
+                        requirement=requirement,
+                        run_dir=run_dir,
+                        error=RequirementPlanningError(
+                            learn_exc.message,
+                            reason_code=learn_exc.reason_code or "primitive_learning_failed",
+                            intake=current_intake,
+                        ),
+                        progress_callback=progress_callback,
+                        extra_artifacts=self._dedupe_paths(all_artifacts),
+                    )
             except RequirementPlanningError as exc:
                 return self._build_blocked_result(
                     requirement=requirement,
@@ -161,6 +211,46 @@ class MaxwellAgent:
         final_result.artifacts = self._dedupe_paths(all_artifacts)
         return final_result
 
+    def _learn_primitive_with_repair(
+        self,
+        requirement: str,
+        intake: RequirementIntake,
+        primitive_token: str,
+        raw_object: dict[str, object] | None,
+        error_details: str,
+    ):
+        previous_template = None
+        last_error = error_details
+        max_attempts = max(1, self._settings.script_max_repairs + 1)
+        for _ in range(max_attempts):
+            artifact = self._llm.learn_primitive_template(
+                requirement=requirement,
+                intake=intake,
+                primitive_token=primitive_token,
+                raw_object=raw_object or {},
+                error_details=last_error,
+                previous_template=previous_template,
+            )
+            self._llm.primitive_library.register(artifact.template, persist=False, mark_persisted=False)
+            try:
+                self._llm.build_local_fallback_script(intake)
+                return artifact
+            except UnknownPrimitiveError as exc:
+                if exc.primitive_token != primitive_token:
+                    raise
+                last_error = exc.message
+                previous_template = artifact.template
+                continue
+            except RequirementPlanningError as exc:
+                last_error = exc.message
+                previous_template = artifact.template
+                continue
+        raise RequirementPlanningError(
+            f"未知原语 {primitive_token} 经多轮学习后仍无法落到本地可执行原语库。最后错误: {last_error}",
+            reason_code="primitive_learning_failed",
+            intake=intake,
+        )
+
     def _execute_for_intake(
         self,
         requirement: str,
@@ -170,7 +260,9 @@ class MaxwellAgent:
         attempt_seed: int = 0,
         seed_script: GeneratedMaxwellScript | None = None,
     ) -> tuple[SimulationResult, GeneratedMaxwellScript]:
-        if seed_script is None:
+        has_ir_plan = bool((intake.simulation_spec or {}).get("ir_plan")) or bool((intake.execution_plan or {}).get("ir_plan"))
+        can_reuse_seed = seed_script is not None and not has_ir_plan and intake.design is not None
+        if not can_reuse_seed:
             if progress_callback:
                 progress_callback(26, "正在调用 AI 生成 PyAEDT 脚本")
             script = self._llm.generate_script(requirement, intake)
@@ -311,7 +403,12 @@ class MaxwellAgent:
         plan_ready = bool(intake.execution_plan.get("execution_ready"))
         has_steps = isinstance(intake.execution_plan.get("steps"), list) and bool(intake.execution_plan.get("steps"))
         has_solver = bool(intake.execution_plan.get("design_type") or intake.execution_plan.get("solution_type"))
-        return spec_ready or plan_ready or (has_steps and has_solver)
+        if spec_ready or plan_ready or (has_steps and has_solver):
+            return True
+        if intake_has_generic_object_graph(intake) or infer_builder_hint(intake) != "unknown":
+            has_any_spec = bool(intake.extracted_parameters) or bool(intake.simulation_spec) or bool(intake.execution_plan)
+            return has_any_spec
+        return False
 
     @staticmethod
     def _needs_feedback_iteration(result: SimulationResult) -> bool:
@@ -524,6 +621,14 @@ class MaxwellAgent:
             encoding="utf-8",
         )
         return [script_code_path, script_json_path, check_path]
+
+    @staticmethod
+    def _persist_json_artifact(path: Path, payload: object) -> Path:
+        path.write_text(
+            json.dumps(payload, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        return path
 
     def _create_run_directory(self) -> Path:
         stamp = datetime.now().strftime("%Y%m%d-%H%M%S-%f")

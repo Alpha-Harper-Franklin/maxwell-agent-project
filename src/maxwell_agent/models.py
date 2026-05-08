@@ -100,6 +100,7 @@ class GeneratedMaxwellScript(BaseModel):
     code: str = ""
     assumptions: list[str] = Field(default_factory=list)
     warnings: list[str] = Field(default_factory=list)
+    primitive_library_updates: list[dict[str, Any]] = Field(default_factory=list)
 
 
 class ScriptStaticCheck(BaseModel):

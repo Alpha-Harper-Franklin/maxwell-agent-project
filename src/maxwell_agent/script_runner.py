@@ -36,8 +36,11 @@ def main(argv: list[str] | None = None) -> int:
         outputs = func(job)
         if not isinstance(outputs, dict):
             raise TypeError(f"{entrypoint}() must return a dict, got {type(outputs).__name__}.")
-        payload = {"status": "completed", "outputs": outputs}
+        output_status = str(outputs.get("status") or "completed").strip().lower()
+        payload = {"status": output_status or "completed", "outputs": outputs}
         result_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        if output_status in {"failed", "error", "fatal_error"}:
+            return 1
         return 0
     except Exception as exc:  # pragma: no cover
         payload = {
