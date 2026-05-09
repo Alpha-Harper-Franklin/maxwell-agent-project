@@ -1,12 +1,13 @@
 # Maxwell Agent Project
 
-`Maxwell Agent Project` is a Windows-first `Ansys Maxwell 2D` agent. It converts Chinese engineering requirements into local Maxwell execution, result extraction, constraint evaluation, feedback-driven revision, and primitive learning.
+`Maxwell Agent Project` is a Windows-first `Ansys Maxwell 2D` agent. It converts engineering requirements into local Maxwell execution, result extraction, constraint evaluation, feedback-driven revision, and primitive learning.
 
 This repository is intentionally kept clean. It contains only:
 
 - runnable source code
 - automated tests
 - verified successful case scripts
+- Windows setup script
 
 It does not include installers, downloaded packages, local run artifacts, private configuration, internal reports, or obsolete implementation branches.
 
@@ -14,7 +15,7 @@ It does not include installers, downloaded packages, local run artifacts, privat
 
 The current open-source version focuses on `Maxwell 2D` tasks that can be represented through supported primitives and solved through a semantic-first execution chain:
 
-`Chinese requirement -> AI semantic parse -> local semantic validation -> primitive/object graph -> local Maxwell execution -> output extraction -> constraint evaluation -> feedback revision -> primitive learning if needed`
+`requirement -> AI semantic parse -> local semantic validation -> primitive/object graph -> local Maxwell execution -> output extraction -> constraint evaluation -> feedback revision -> primitive learning if needed`
 
 Verified named 2D families:
 
@@ -34,16 +35,32 @@ Verified generic 2D path:
 
 - `src/maxwell_agent/`: latest runnable implementation
 - `tests/`: automated verification
-- `scripts/`: verified successful case runners
+- `scripts/`: setup script and verified successful case runners
 
 ## Requirements
 
 - Windows
 - Python `3.12+`
 - local `Ansys Electronics Desktop / Maxwell`
-- a compatible LLM API endpoint and key
+- an OpenAI-compatible LLM API endpoint and key
 
-## Setup
+## One-Command Windows Setup
+
+Run this from PowerShell:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\setup_windows.ps1
+```
+
+The setup script creates `.venv`, installs the project, and creates `.env` by asking for:
+
+- your OpenAI-compatible API base URL
+- your API key
+- your model name
+
+No API key or private endpoint is stored in this repository.
+
+## Manual Setup
 
 ```powershell
 py -3.12 -m venv .venv
@@ -70,7 +87,7 @@ python -m maxwell_agent.cli smoke-llm
 ## Run
 
 ```powershell
-python -m maxwell_agent.cli demo "做一个24V直流电磁铁，气隙2mm，电流不超过2A，尽量提高吸力。"
+python -m maxwell_agent.cli demo "Design a 24V DC electromagnet with a 2mm air gap, current no higher than 2A, and maximize force within a compact size."
 ```
 
 ## Verified Successful Cases

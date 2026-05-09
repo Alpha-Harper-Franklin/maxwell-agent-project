@@ -18,7 +18,7 @@ class Settings(BaseSettings):
     )
 
     project_root: Path = Field(default=DEFAULT_PROJECT_ROOT, validation_alias="PROJECT_ROOT")
-    codexa_base_url: str = "https://codexa.leizhen.cloud/v1"
+    codexa_base_url: str | None = None
     codexa_api_key: str | None = None
     codexa_model: str = "gpt-5.4"
     codexa_reasoning_effort: str = "high"
@@ -36,7 +36,7 @@ class Settings(BaseSettings):
             return value
         return Path(value)
 
-    @field_validator("codexa_api_key", "maxwell_version", mode="before")
+    @field_validator("codexa_base_url", "codexa_api_key", "maxwell_version", mode="before")
     @classmethod
     def _normalize_optional_text(cls, value: str | None) -> str | None:
         if value is None:

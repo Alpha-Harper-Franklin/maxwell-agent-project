@@ -4142,6 +4142,8 @@ def _apply_design_patch(
 
 class CodexaLLMClient:
     def __init__(self, settings: Settings) -> None:
+        if not settings.codexa_base_url:
+            raise ValueError("CODEXA_BASE_URL is not configured.")
         if not settings.codexa_api_key:
             raise ValueError("CODEXA_API_KEY is not configured.")
         self._settings = settings
