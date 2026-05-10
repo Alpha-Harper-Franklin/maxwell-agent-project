@@ -3,7 +3,6 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass, field
 from datetime import datetime
-from html import escape
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from threading import Lock, Thread
@@ -110,7 +109,7 @@ def serve_demo(agent: MaxwellAgent, host: str, port: int) -> None:
                     "finished_at": self.job.finished_at,
                     "error_message": self.job.error_message,
                     "timeline": list(self.job.timeline[-8:]),
-                    "bundle_html": bundle.to_html_document(page_title="Maxwell 演示运行结果") if bundle else "",
+                    "bundle_html": bundle.to_html_document(page_title="Maxwell 智能体运行结果") if bundle else "",
                     "bundle_status": bundle.status if bundle else "",
                     "bundle_message": bundle.message if bundle else "",
                     "run_directory": str(bundle.run_directory) if bundle else "",
@@ -167,7 +166,7 @@ def serve_demo(agent: MaxwellAgent, host: str, port: int) -> None:
             if not self.server.run_lock.acquire(blocking=False):
                 payload = self.server.status_payload()
                 payload["accepted"] = False
-                payload["error"] = "当前已有一个 Maxwell 任务在运行。请等待本次计算完成后再提交。"
+                payload["error"] = "当前已有一个 Maxwell 任务正在运行。请等待本次计算完成后再提交。"
                 self._write_json(payload, status=HTTPStatus.CONFLICT)
                 return
 
@@ -229,20 +228,16 @@ def _render_page() -> str:
       --muted: #5c665f;
       --line: #d8cfbc;
       --accent: #1f5e4a;
-      --accent-2: #bb5f2f;
-      --shadow: 0 18px 50px rgba(31, 39, 32, 0.08);
-      --ok: #1c6b51;
       --warn: #b55f30;
       --track: rgba(31, 94, 74, 0.12);
+      --shadow: 0 18px 50px rgba(31, 39, 32, 0.08);
     }
     * { box-sizing: border-box; }
     body {
       margin: 0;
       font-family: "Microsoft YaHei UI", "PingFang SC", "Segoe UI", sans-serif;
       color: var(--text);
-      background:
-        radial-gradient(circle at 15% 20%, rgba(31, 94, 74, 0.15), transparent 24%),
-        linear-gradient(180deg, #f7f0e2 0%, #efe5d4 100%);
+      background: linear-gradient(180deg, #f7f0e2 0%, #efe5d4 100%);
       min-height: 100vh;
     }
     .shell {
@@ -251,25 +246,13 @@ def _render_page() -> str:
     }
     .hero {
       padding: 30px 32px;
-      border-radius: 28px;
+      border-radius: 20px;
       background: linear-gradient(135deg, rgba(23, 58, 47, 0.98), rgba(31, 94, 74, 0.95));
       color: #f8f3ea;
       box-shadow: var(--shadow);
-      position: relative;
-      overflow: hidden;
     }
-    .hero::after {
-      content: "";
-      position: absolute;
-      right: -30px;
-      top: -30px;
-      width: 180px;
-      height: 180px;
-      border-radius: 50%;
-      background: rgba(255, 255, 255, 0.07);
-    }
-    h1, h2, h3, p { margin: 0; }
-    h1 { font-size: clamp(30px, 4vw, 46px); font-weight: 800; }
+    h1, h2, p { margin: 0; }
+    h1 { font-size: clamp(30px, 4vw, 44px); font-weight: 800; }
     .hero p {
       margin-top: 12px;
       max-width: 900px;
@@ -286,7 +269,7 @@ def _render_page() -> str:
     .card {
       background: var(--paper);
       border: 1px solid var(--line);
-      border-radius: 22px;
+      border-radius: 14px;
       padding: 22px;
       box-shadow: var(--shadow);
     }
@@ -300,12 +283,13 @@ def _render_page() -> str:
       font-size: 13px;
       color: var(--muted);
       margin-bottom: 8px;
+      line-height: 1.6;
     }
     textarea {
       width: 100%;
       min-height: 220px;
       border: 1px solid var(--line);
-      border-radius: 16px;
+      border-radius: 10px;
       padding: 14px;
       resize: vertical;
       font: inherit;
@@ -316,7 +300,7 @@ def _render_page() -> str:
       margin-top: 14px;
       width: 100%;
       border: none;
-      border-radius: 16px;
+      border-radius: 10px;
       padding: 14px 16px;
       font: inherit;
       font-weight: 700;
@@ -339,7 +323,7 @@ def _render_page() -> str:
     .status-panel {
       margin-top: 18px;
       padding: 16px;
-      border-radius: 18px;
+      border-radius: 12px;
       background: rgba(31, 94, 74, 0.08);
       border: 1px solid rgba(31, 94, 74, 0.14);
     }
@@ -387,7 +371,7 @@ def _render_page() -> str:
     }
     .error-box {
       margin-top: 14px;
-      border-radius: 14px;
+      border-radius: 10px;
       padding: 12px 14px;
       background: rgba(181, 95, 48, 0.12);
       color: #8b4323;
@@ -417,7 +401,7 @@ def _render_page() -> str:
     }
     .result-frame {
       border: 1px solid var(--line);
-      border-radius: 20px;
+      border-radius: 12px;
       overflow: hidden;
       background: #fff;
       min-height: 720px;
@@ -430,7 +414,7 @@ def _render_page() -> str:
     }
     .placeholder {
       border: 1px dashed var(--line);
-      border-radius: 20px;
+      border-radius: 12px;
       min-height: 720px;
       padding: 24px;
       display: flex;
@@ -440,13 +424,6 @@ def _render_page() -> str:
       line-height: 1.8;
       background: rgba(255, 253, 248, 0.72);
       text-align: center;
-    }
-    .subtle-link {
-      color: var(--accent);
-      text-decoration: none;
-    }
-    .subtle-link:hover {
-      text-decoration: underline;
     }
     @media (max-width: 920px) {
       .grid { grid-template-columns: 1fr; }
@@ -458,7 +435,7 @@ def _render_page() -> str:
   <div class="shell">
     <section class="hero">
       <h1>Maxwell 智能体演示</h1>
-      <p>输入一句中文需求，页面会立即返回，然后通过前端轮询显示当前阶段、进度条和最终结果。网页只允许单任务串行执行，避免 Maxwell 项目锁定。</p>
+      <p>输入一句工程需求，系统会自动解析需求、调用本地 Maxwell 2D 建模求解，并把结果与约束判定显示出来。页面采用轮询进度条，避免长时间请求卡住浏览器。</p>
     </section>
 
     <div class="grid">
@@ -472,8 +449,8 @@ def _render_page() -> str:
         <div id="error-box" class="error-box"></div>
         <div class="hint">
           说明:
-          <br>1. 页面提交后会立刻返回，不会再卡在浏览器请求上。
-          <br>2. 运行期间不要重复点击，也不要同时开多个演示页一起提交。
+          <br>1. 提交后页面会立即返回，通过进度条显示当前阶段。
+          <br>2. 运行期间不要重复点击，也不要同时打开多个页面提交任务。
           <br>3. 结果文件会保存到项目的 workspace 目录。
         </div>
 

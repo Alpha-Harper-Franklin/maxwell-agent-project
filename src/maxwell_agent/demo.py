@@ -50,31 +50,28 @@ DESIGN_LABELS = {
 
 OUTPUT_LABELS = {
     "max_flux_density_t": "最大磁密 (T)",
+    "global_max_flux_density_t": "全局最大磁密 (T)",
     "project_name": "项目名",
     "design_name": "设计名",
     "flux_density_note": "磁密提取说明",
     "force_n": "吸力 (N)",
-    "estimated_coil_resistance_ohm": "估算线圈电阻 (Ω)",
+    "estimated_coil_resistance_ohm": "估算线圈电阻 (ohm)",
     "estimated_current_at_supply_a": "估算供电电流 (A)",
+    "cross_section_area_mm2": "截面积 (mm^2)",
+    "estimated_current_density_a_per_mm2": "估算电流密度 (A/mm^2)",
+    "avg_current_density_a_per_mm2": "平均电流密度 (A/mm^2)",
+    "capacitance_pf": "电容 (pF)",
+    "capacitance_f": "电容 (F)",
+    "capacitance_per_unit_length_pf_per_m": "单位长度电容 (pF/m)",
+    "max_electric_field_v_per_m": "最大电场 (V/m)",
+    "max_electric_field_note": "最大电场说明",
+    "reference_average_field_v_per_m": "参考平均电场 (V/m)",
+    "reference_capacitance_f_for_1m_depth": "参考电容 (1m 深度, F)",
+    "matrix_export_path": "矩阵导出文件",
+    "estimated_secondary_voltage_v": "估算次级电压 (V)",
+    "turns_ratio": "匝比",
+    "estimated_inductance_h": "估算电感 (H)",
 }
-
-OUTPUT_LABELS.update(
-    {
-        "max_flux_density_t": "最大磁密 (T)",
-        "project_name": "项目名",
-        "design_name": "设计名",
-        "flux_density_note": "磁密提取说明",
-        "force_n": "吸力 (N)",
-        "estimated_coil_resistance_ohm": "估算线圈电阻 (Ω)",
-        "estimated_current_at_supply_a": "估算供电电流 (A)",
-        "capacitance_pf": "电容 (pF)",
-        "capacitance_f": "电容 (F)",
-        "max_electric_field_note": "最大电场结果",
-        "reference_average_field_v_per_m": "参考平均电场 (V/m)",
-        "reference_capacitance_f_for_1m_depth": "参考电容 (1m 深度, F)",
-        "matrix_export_path": "电容矩阵文件",
-    }
-)
 
 OBJECTIVE_LABELS = {
     "maximize_force": "优先提高吸力",
@@ -133,12 +130,12 @@ class DemoBundle:
         for row in self.evaluation_rows:
             lines.append(f"- {row.label}: {row.value}")
 
-        lines.extend(["", "设计参数"])
+        lines.extend(["", "设计参数 / 结构化规格"])
         if self.design_rows:
             for row in self.design_rows:
                 lines.append(f"- {row.label}: {row.value}")
         else:
-            lines.append("- 当前任务未进入 Maxwell 2D 参数化模板。")
+            lines.append("- 当前任务没有生成传统电磁铁参数表，已输出结构化仿真规格和执行结果。")
 
         if self.output_rows:
             lines.extend(["", "仿真输出"])
@@ -162,13 +159,9 @@ class DemoBundle:
             lines.append("产物文件")
             for artifact in self.artifact_paths:
                 lines.append(f"- {artifact}")
-        return (
-            "\n".join(lines)
-            .replace("Maxwell 2D", "通用 Maxwell")
-            .replace("参数化模板", "仿真规格和执行结果")
-        )
+        return "\n".join(lines)
 
-    def to_html_document(self, page_title: str = "Maxwell 演示运行结果") -> str:
+    def to_html_document(self, page_title: str = "Maxwell 智能体运行结果") -> str:
         artifact_list = "".join(
             f'<li><a href="{escape(path.resolve().as_uri())}">{escape(path.name)}</a>'
             f'<div class="subtle">{escape(str(path))}</div></li>'
@@ -177,9 +170,7 @@ class DemoBundle:
         design_rows = "".join(
             f"<tr><th>{escape(row.label)}</th><td>{escape(row.value)}</td></tr>"
             for row in self.design_rows
-        ) or "<tr><th>当前状态</th><td>当前任务未进入 Maxwell 2D 参数化模板。</td></tr>"
-        design_rows = design_rows.replace("Maxwell 2D", "通用 Maxwell")
-        design_rows = design_rows.replace("参数化模板", "仿真规格和执行结果")
+        ) or "<tr><th>当前状态</th><td>当前任务没有生成传统电磁铁参数表，已输出结构化仿真规格和执行结果。</td></tr>"
         output_rows = "".join(
             f"<tr><th>{escape(row.label)}</th><td>{escape(row.value)}</td></tr>"
             for row in self.output_rows
@@ -219,9 +210,7 @@ class DemoBundle:
       margin: 0;
       font-family: "Microsoft YaHei UI", "PingFang SC", "Segoe UI", sans-serif;
       color: var(--text);
-      background:
-        radial-gradient(circle at top left, rgba(36, 92, 74, 0.12), transparent 30%),
-        linear-gradient(180deg, #f7f2e7 0%, #efe7d9 100%);
+      background: linear-gradient(180deg, #f7f2e7 0%, #efe7d9 100%);
       min-height: 100vh;
     }}
     .shell {{
@@ -231,7 +220,7 @@ class DemoBundle:
     .hero {{
       background: linear-gradient(135deg, rgba(36, 92, 74, 0.96), rgba(23, 59, 48, 0.98));
       color: #f4f0e8;
-      border-radius: 24px;
+      border-radius: 20px;
       padding: 28px 30px;
       box-shadow: var(--shadow);
     }}
@@ -253,7 +242,7 @@ class DemoBundle:
     .panel {{
       background: var(--panel);
       border: 1px solid var(--line);
-      border-radius: 20px;
+      border-radius: 14px;
       padding: 22px;
       box-shadow: var(--shadow);
     }}
@@ -272,7 +261,7 @@ class DemoBundle:
     .mono {{
       font-family: "Consolas", "SFMono-Regular", monospace;
       background: rgba(36, 92, 74, 0.06);
-      border-radius: 12px;
+      border-radius: 10px;
       padding: 14px;
       line-height: 1.6;
       white-space: pre-wrap;
@@ -341,7 +330,7 @@ class DemoBundle:
 
     <div class="grid">
       <section class="panel">
-        <h2>设计参数</h2>
+        <h2>设计参数 / 结构化规格</h2>
         <table>{design_rows}</table>
       </section>
       <section class="panel warn">
@@ -449,7 +438,7 @@ def _build_output_rows(outputs: dict[str, Any]) -> list[DisplayRow]:
         elif key.startswith("spec_"):
             label = f"仿真规格 / {key[5:]}"
         elif key == "task_family":
-            label = "任务类型"
+            label = "任务辅助标签"
         elif key == "support_message":
             label = "AI 结构化结论"
         else:

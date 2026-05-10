@@ -17,17 +17,17 @@ console = Console()
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Maxwell 2D industrial agent scaffold.")
+    parser = argparse.ArgumentParser(description="Maxwell 2D industrial agent.")
     sub = parser.add_subparsers(dest="command", required=True)
 
     sub.add_parser("probe-env", help="Detect local Maxwell/AEDT availability.")
-    sub.add_parser("smoke-llm", help="Call the configured Codexa model once.")
-    sub.add_parser("list-models", help="List available cloud models from Codexa.")
+    sub.add_parser("smoke-llm", help="Call the configured LLM model once.")
+    sub.add_parser("list-models", help="List available cloud models.")
 
     plan = sub.add_parser("plan", help="Convert a requirement into structured simulation data.")
     plan.add_argument("requirement", help="Natural-language requirement.")
 
-    run = sub.add_parser("run", help="Plan the design and try to execute Maxwell.")
+    run = sub.add_parser("run", help="Plan the design and execute Maxwell.")
     run.add_argument("requirement", help="Natural-language requirement.")
 
     demo = sub.add_parser("demo", help="Run a user-friendly CLI demo.")
@@ -81,16 +81,16 @@ def main() -> None:
     if args.command == "demo":
         requirement = args.requirement.strip() if args.requirement else ""
         if not requirement:
-            console.print("[bold]请输入需求：[/bold]", end="")
+            console.print("[bold]Enter requirement:[/bold] ", end="")
             requirement = input().strip()
         if not requirement:
             parser.error("A non-empty requirement is required for demo mode.")
         bundle = execute_demo(agent, requirement)
         console.print(bundle.to_text_report(), markup=False)
         if bundle.summary_text_path:
-            console.print(f"\n摘要文件: {bundle.summary_text_path}", markup=False)
+            console.print(f"\nText summary: {bundle.summary_text_path}", markup=False)
         if bundle.summary_html_path:
-            console.print(f"HTML 摘要: {bundle.summary_html_path}", markup=False)
+            console.print(f"HTML summary: {bundle.summary_html_path}", markup=False)
         return
 
     if args.command == "serve":
