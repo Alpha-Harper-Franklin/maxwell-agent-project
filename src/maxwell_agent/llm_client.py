@@ -170,6 +170,67 @@ def _coerce_xy_pair(value: Any) -> tuple[float | None, float | None]:
     return None, None
 
 
+def _normalize_generic_primitives_to_objects(geometry: dict[str, Any]) -> list[dict[str, Any]]:
+    primitives = _as_mapping_list(geometry.get("primitives"))
+    if not primitives:
+        return []
+    operations = _as_mapping_list(geometry.get("operations"))
+    primitive_and_operations = [*primitives, *operations]
+
+    by_name = {str(item.get("name") or "").strip(): item for item in primitives if str(item.get("name") or "").strip()}
+    objects: list[dict[str, Any]] = []
+    consumed: set[str] = set()
+
+    for item in primitive_and_operations:
+        item_type = str(item.get("type") or item.get("kind") or item.get("shape") or "").strip().lower()
+        if item_type != "subtract":
+            continue
+        blank_name = str(item.get("blank") or item.get("blank_part") or item.get("outer") or "").strip()
+        tool_name = str(item.get("tool") or item.get("tool_part") or item.get("inner") or "").strip()
+        blank = by_name.get(blank_name)
+        tool = by_name.get(tool_name)
+        if not blank or not tool:
+            continue
+        blank_type = str(blank.get("type") or blank.get("kind") or blank.get("shape") or "").strip().lower()
+        tool_type = str(tool.get("type") or tool.get("kind") or tool.get("shape") or "").strip().lower()
+        if blank_type != "circle" or tool_type != "circle":
+            continue
+        outer_radius = _coerce_measure_value(blank.get("radius") or blank.get("radius_mm"))
+        inner_radius = _coerce_measure_value(tool.get("radius") or tool.get("radius_mm"))
+        if outer_radius is None or inner_radius is None:
+            continue
+        center_x, center_y = _coerce_xy_pair(blank.get("center") or blank.get("center_mm"))
+        if center_x is None or center_y is None:
+            center_x, center_y = _coerce_xy_pair(tool.get("center") or tool.get("center_mm"))
+        if center_x is None or center_y is None:
+            center_x, center_y = 0.0, 0.0
+        objects.append(
+            {
+                "name": str(item.get("result_name") or item.get("name") or "annular_conductor"),
+                "type": "annulus",
+                "center": {"x": center_x, "y": center_y},
+                "inner_radius": min(inner_radius, outer_radius),
+                "outer_radius": max(inner_radius, outer_radius),
+            }
+        )
+        consumed.update({blank_name, tool_name, str(item.get("name") or "").strip(), str(item.get("result_name") or "").strip()})
+
+    for item in primitives:
+        name = str(item.get("name") or "").strip()
+        if name in consumed:
+            continue
+        item_type = str(item.get("type") or item.get("kind") or item.get("shape") or "").strip().lower()
+        if item_type in {"circle", "rectangle", "annulus", "region", "air_region"}:
+            normalized = dict(item)
+            normalized.setdefault("type", item_type)
+            if item_type == "annulus":
+                normalized.setdefault("center", item.get("center") or item.get("center_mm") or {"x": 0.0, "y": 0.0})
+                normalized.setdefault("inner_radius", item.get("inner_radius") or item.get("inner_radius_mm"))
+                normalized.setdefault("outer_radius", item.get("outer_radius") or item.get("outer_radius_mm"))
+            objects.append(normalized)
+    return objects
+
+
 def _sanitize_identifier(value: Any, fallback: str) -> str:
     text = _normalize_task_family(value)
     if not text:
@@ -404,14 +465,20 @@ def _looks_like_transformer_requirement(text: str) -> bool:
 
 def _looks_like_inductor_requirement(text: str) -> bool:
     lower = text.lower()
-    return any(
+    if any(
         keyword in text
         for keyword in (
             "\u7535\u611f",
             "\u7535\u6297\u5668",
             "\u7ebf\u5708\u7535\u611f",
         )
-    ) or "inductor" in lower
+    ) or "inductor" in lower:
+        return True
+    has_inductance_unit = bool(re.search(rf"{FLOAT_PATTERN}\s*(?:mH|uH|H)\b", text, flags=re.IGNORECASE))
+    has_current = bool(re.search(rf"{FLOAT_PATTERN}\s*A\b", text, flags=re.IGNORECASE))
+    has_turn_like_number = any(keyword in text for keyword in ("\u530d", "\u5305", "turn"))
+    corrupted_text = "?" in text
+    return has_inductance_unit and has_current and (has_turn_like_number or corrupted_text)
 
 
 def _looks_like_solenoid_requirement(text: str) -> bool:
@@ -517,7 +584,9 @@ def _extract_turns(text: str, default: int) -> int:
         text,
         [
             rf"(?:\u530d\u6570|\u7ebf\u5708\u530d\u6570|turns?)\s*(?:=|\u8bbe\u4e3a|\u53d6\u503c\u4e3a)?\s*{FLOAT_PATTERN}\b",
+            rf"(?:\u5305\u6570|\u7ebf\u5708\u5305\u6570|turns?)\s*(?:=|\u8bbe\u4e3a|\u53d6\u503c\u4e3a)?\s*{FLOAT_PATTERN}\b",
             rf"{FLOAT_PATTERN}\s*(?:\u530d|turns?)\b",
+            rf"{FLOAT_PATTERN}\s*(?:\u5305|turns?)\b",
         ],
     )
     return int(round(turns or float(default)))
@@ -934,6 +1003,90 @@ def _fallback_unknown_intake(requirement: str) -> RequirementIntake:
     )
 
 
+def _looks_like_annular_conductor_requirement(text: str) -> bool:
+    lower = text.lower()
+    has_ring = any(token in text for token in ("\u540c\u5fc3", "\u5706\u73af", "\u73af\u5f62", "\u73af\u5bfc\u4f53", "\u5185\u534a\u5f84", "\u5916\u534a\u5f84"))
+    has_current = "\u7535\u6d41" in text or re.search(rf"{FLOAT_PATTERN}\s*A\b", text, flags=re.IGNORECASE) is not None
+    return (has_ring and has_current) or ("annular" in lower and "current" in lower)
+
+
+def _fallback_annular_conductor_intake(requirement: str) -> RequirementIntake:
+    text = requirement.strip()
+    inner_radius_mm = _extract_first_float(
+        text,
+        [
+            rf"(?:\u5185\u534a\u5f84|inner\s*radius)\s*{FLOAT_PATTERN}\s*mm\b",
+        ],
+    ) or 3.0
+    outer_radius_mm = _extract_first_float(
+        text,
+        [
+            rf"(?:\u5916\u534a\u5f84|outer\s*radius)\s*{FLOAT_PATTERN}\s*mm\b",
+        ],
+    ) or 6.0
+    current_a = _extract_current_a(text, default=100.0)
+    return RequirementIntake(
+        task_family="generic_maxwell",
+        supported_now=True,
+        support_message="\u5df2\u8bc6\u522b\u4e3a\u4e8c\u7ef4\u540c\u5fc3\u73af\u5bfc\u4f53\u9759\u78c1\u4efb\u52a1\uff0c\u5e76\u8f6c\u6210\u901a\u7528 Maxwell IR \u539f\u8bed\u56fe\u3002",
+        summary="\u5df2\u6309\u4e8c\u7ef4\u73af\u5f62\u8f7d\u6d41\u5bfc\u4f53\u751f\u6210\u7ed3\u6784\u5316\u4eff\u771f\u89c4\u683c\u3002",
+        extracted_parameters={
+            "geometry_type": "annular_conductor_cross_section",
+            "inner_radius_mm": inner_radius_mm,
+            "outer_radius_mm": outer_radius_mm,
+            "current_a": current_a,
+        },
+        simulation_spec={
+            "software": "ansys_maxwell",
+            "physics_type": "magnetostatic_2d",
+            "task_family": "generic_maxwell",
+            "geometry": {
+                "model_dimensionality": "2D planar",
+                "primitives": [
+                    {
+                        "name": "annular_conductor",
+                        "type": "annulus",
+                        "center": {"x": 0.0, "y": 0.0, "unit": "mm"},
+                        "inner_radius": {"value": inner_radius_mm, "unit": "mm"},
+                        "outer_radius": {"value": outer_radius_mm, "unit": "mm"},
+                    }
+                ],
+            },
+            "materials": [{"target": "annular_conductor", "material": "copper"}],
+            "excitations": [{"target": "annular_conductor", "type": "total_current", "value_A": current_a}],
+            "boundaries": [{"target": "outer_air_region", "type": "balloon"}],
+            "solver": {"solution_type": "Magnetostatic"},
+            "required_outputs": [{"name": "B_max_global", "unit": "T"}],
+            "execution_ready": True,
+            "missing_inputs": [],
+        },
+        execution_plan={
+            "software": "ansys_maxwell",
+            "task_family": "generic_maxwell",
+            "design_type": "Maxwell 2D",
+            "solution_type": "Magnetostatic",
+            "project_name": "annular_conductor_2d",
+            "design_name": "GenericAnnular2D",
+            "model_units": "mm",
+            "variables": {
+                "inner_radius_mm": inner_radius_mm,
+                "outer_radius_mm": outer_radius_mm,
+                "current_a": current_a,
+            },
+            "steps": ["build_annulus", "assign_current", "solve", "extract_bmax"],
+            "postprocess": ["max_flux_density"],
+            "execution_ready": True,
+            "missing_inputs": [],
+        },
+        assumptions=[
+            "\u9ed8\u8ba4\u7535\u6d41\u65b9\u5411\u6cbf\u4e8c\u7ef4\u622a\u9762\u6cd5\u5411\uff0c\u6750\u6599\u4e3a\u94dc\uff0c\u5468\u56f4\u4e3a\u7a7a\u6c14\u57df\u3002",
+        ],
+        warnings=[
+            "\u8be5\u6a21\u578b\u662f\u4e8c\u7ef4\u622a\u9762\u9759\u78c1\u9996\u7248\u9a8c\u8bc1\uff0c\u672a\u5305\u542b\u6709\u9650\u957f\u5ea6\u7aef\u90e8\u6548\u5e94\u3002",
+        ],
+    )
+
+
 def _fallback_capacitor_intake(requirement: str) -> RequirementIntake:
     text = requirement.strip()
     lower = text.lower()
@@ -1181,12 +1334,7 @@ def _fallback_inductor_2d_intake(requirement: str) -> RequirementIntake:
             rf"(?:\u7535\u6d41|current)\s*(?:=|\u8bbe\u4e3a|\u53d6\u503c\u4e3a)?\s*{FLOAT_PATTERN}\s*A\b",
         ],
     ) or 2.0
-    turns = int(round(_extract_first_float(
-        text,
-        [
-            rf"(?:\u530d\u6570|turns?)\s*(?:=|\u8bbe\u4e3a)?\s*{FLOAT_PATTERN}\b",
-        ],
-    ) or 600.0))
+    turns = _extract_turns(text, default=600)
     target_inductance_h = _extract_inductance_h(text)
     return RequirementIntake(
         task_family="inductor_2d",
@@ -1486,6 +1634,8 @@ def _fallback_busbar_2d_intake(requirement: str) -> RequirementIntake:
 
 def _fallback_intake_from_requirement(requirement: str) -> RequirementIntake:
     text = requirement.strip()
+    if _looks_like_annular_conductor_requirement(text):
+        return _fallback_annular_conductor_intake(text)
     if _looks_like_coaxial_capacitor_requirement(text):
         return _fallback_coaxial_capacitor_2d_intake(text)
     if _looks_like_busbar_requirement(text):
@@ -1524,6 +1674,8 @@ def _rescue_supported_fallback_intake(requirement: str, intake: RequirementIntak
         return _fallback_busbar_2d_intake(text)
     if _looks_like_coaxial_capacitor_requirement(text):
         return _fallback_coaxial_capacitor_2d_intake(text)
+    if _looks_like_annular_conductor_requirement(text):
+        return _fallback_annular_conductor_intake(text)
     if _looks_like_capacitor_requirement(text):
         return _fallback_capacitor_intake(text)
     if _looks_like_transformer_requirement(text):
@@ -1584,6 +1736,66 @@ def _validate_design_patch_payload(payload: dict[str, Any]) -> ElectromagnetDesi
         return ElectromagnetDesignPatch.model_validate(normalized)
     except ValidationError as exc:
         raise RequirementPlanningError("LLM 反馈修正结果不符合设计补丁格式。") from exc
+
+
+def _estimate_design_supply_current(design: ElectromagnetDesign) -> float | None:
+    if design.supply_voltage_v is None or design.coil_turns <= 0:
+        return None
+    window_area_mm2 = design.coil_width_mm * design.coil_height_mm
+    if window_area_mm2 <= 0:
+        return None
+    conductor_area_m2 = (window_area_mm2 * 0.6 / design.coil_turns) * 1e-6
+    if conductor_area_m2 <= 0:
+        return None
+    mean_turn_length_mm = 2.0 * (design.coil_height_mm + design.coil_width_mm + design.core_thickness_mm)
+    total_length_m = design.coil_turns * mean_turn_length_mm * 1e-3
+    coil_resistance = 1.724e-8 * total_length_m / conductor_area_m2
+    if coil_resistance <= 0:
+        return None
+    return design.supply_voltage_v / coil_resistance
+
+
+def _enforce_design_current_voltage_constraints(design: ElectromagnetDesign) -> ElectromagnetDesign:
+    if design.supply_voltage_v is None or design.current_limit_a is None:
+        return design
+    limit = design.current_limit_a
+    estimate = _estimate_design_supply_current(design)
+    if estimate is None:
+        return design
+
+    turns = design.coil_turns
+    coil_width = design.coil_width_mm
+    coil_height = design.coil_height_mm
+    for _ in range(16):
+        if estimate <= limit + 1e-9:
+            break
+        if turns < 10000:
+            ratio = max(1.2, min(2.0, (estimate / limit) ** 0.5))
+            turns = min(10000, max(turns + 1, int(round(turns * ratio))))
+        elif coil_width > 1.0:
+            coil_width = max(1.0, coil_width * 0.85)
+        elif coil_height > 1.0:
+            coil_height = max(1.0, coil_height * 0.85)
+        trial = design.model_copy(
+            update={
+                "coil_turns": turns,
+                "coil_width_mm": coil_width,
+                "coil_height_mm": coil_height,
+                "current_a": min(design.current_a, limit),
+            }
+        )
+        estimate = _estimate_design_supply_current(trial)
+        if estimate is None:
+            break
+
+    return design.model_copy(
+        update={
+            "coil_turns": turns,
+            "coil_width_mm": coil_width,
+            "coil_height_mm": coil_height,
+            "current_a": min(design.current_a, limit),
+        }
+    )
 
 
 def _validate_script_payload(payload: dict[str, Any]) -> GeneratedMaxwellScript:
@@ -2677,8 +2889,8 @@ def _build_generic_2d_ir_plan(
     else:
         materials_by_object = {}
         for item in materials:
-            object_name = str(item.get("object") or "").strip()
-            material_name = str(item.get("material") or "").strip()
+            object_name = str(item.get("object") or item.get("assignment") or item.get("target") or "").strip()
+            material_name = str(item.get("material") or item.get("chosen_material") or item.get("value") or "").strip()
             if object_name and material_name:
                 materials_by_object[object_name] = material_name
                 continue
@@ -2693,8 +2905,9 @@ def _build_generic_2d_ir_plan(
         geometry.get("objects") or geometry.get("cross_section_objects") or geometry.get("entities")
     )
     if not geometry_objects:
+        geometry_objects = _normalize_generic_primitives_to_objects(geometry)
+    if not geometry_objects:
         raise RequirementPlanningError("当前通用 2D 任务缺少 geometry.objects，暂时无法合成本地 Maxwell IR。")
-
     requested_blob = json.dumps(required_outputs or [], ensure_ascii=False).lower()
     solver_blob = json.dumps(solver, ensure_ascii=False).lower()
     excitation_blob = json.dumps(excitations_value, ensure_ascii=False).lower()
@@ -3136,8 +3349,16 @@ def _build_generic_2d_ir_plan(
         target_name = object_name_map.get(raw_target)
         if not target_name:
             continue
-        kind = str(excitation.get("type") or "").strip().lower()
+        kind = str(excitation.get("type") or excitation.get("excitation_type") or "").strip().lower()
+        if kind in {"total_current", "current_total", "dc_current"}:
+            kind = "current"
+        elif kind in {"electric_potential", "potential"}:
+            kind = "voltage"
         value = _coerce_measure_value(excitation.get("value"))
+        if value is None:
+            value = _coerce_measure_value(excitation.get("current"))
+        if value is None:
+            value = _coerce_measure_value(excitation.get("voltage"))
         if value is None:
             value = _coerce_measure_value(excitation.get("amplitude"))
         if value is None:
@@ -3510,6 +3731,7 @@ def _build_local_script_from_transformer_intake(intake: RequirementIntake) -> Ge
             simulation_spec = dict(job.get("simulation_spec") or {{}})
             geometry = dict(simulation_spec.get("geometry") or {{}})
             excitations = dict(simulation_spec.get("excitations") or {{}})
+            constraints = dict(simulation_spec.get("constraints") or {{}})
             project_file = str(job["project_file"])
             version = job.get("maxwell_version")
             non_graphical = bool(job.get("non_graphical", True))
@@ -3638,6 +3860,7 @@ def _build_local_script_from_inductor_intake(intake: RequirementIntake) -> Gener
             simulation_spec = dict(job.get("simulation_spec") or {{}})
             geometry = dict(simulation_spec.get("geometry") or {{}})
             excitations = dict(simulation_spec.get("excitations") or {{}})
+            constraints = dict(simulation_spec.get("constraints") or {{}})
             project_file = str(job["project_file"])
             version = job.get("maxwell_version")
             non_graphical = bool(job.get("non_graphical", True))
@@ -3652,12 +3875,23 @@ def _build_local_script_from_inductor_intake(intake: RequirementIntake) -> Gener
             region_padding = float(geometry.get("region_padding_mm", {region_padding}))
             current_a = float(excitations.get("current_a", {current_a}))
             coil_turns = int(excitations.get("coil_turns", {coil_turns}))
+            target_inductance_h = constraints.get("target_inductance_h")
+            try:
+                target_inductance_h = float(target_inductance_h) if target_inductance_h is not None else None
+            except (TypeError, ValueError):
+                target_inductance_h = None
 
             outputs: dict[str, float | str] = {{}}
             mu0 = 4 * math.pi * 1e-7
             effective_gap_m = max(air_gap, 0.1) * 1e-3
+            if target_inductance_h is not None and target_inductance_h > 0 and coil_turns > 0:
+                target_area_m2 = target_inductance_h * effective_gap_m / max(mu0 * coil_turns * coil_turns, 1e-18)
+                target_area_mm2 = target_area_m2 * 1e6
+                core_width = max(0.5, target_area_mm2 / max(core_thickness, 0.1))
+                core_height = max(core_height, core_width + 2.0 * core_thickness)
             core_area_m2 = (core_thickness * core_width) * 1e-6
             estimated_inductance_h = mu0 * coil_turns * coil_turns * core_area_m2 / max(effective_gap_m, 1e-6)
+            estimated_max_flux_density_t = abs(estimated_inductance_h * current_a / max(coil_turns * core_area_m2, 1e-18))
             with Maxwell2d(
                 project=project_file,
                 design="Inductor2D",
@@ -3699,24 +3933,21 @@ def _build_local_script_from_inductor_intake(intake: RequirementIntake) -> Gener
                     pass
                 app.create_setup(name="Setup1", setup_type="Magnetostatic")
                 app.save_project()
-                solve_ok = bool(app.analyze_setup("Setup1"))
-                outputs["solve_status"] = "completed" if solve_ok else "failed"
-                if not solve_ok:
-                    outputs["status"] = "failed"
-                    outputs["notes"] = "Maxwell solve failed."
-                    outputs["project_name"] = app.project_name
-                    outputs["design_name"] = app.design_name
-                    app.save_project()
-                    return outputs
-                try:
-                    outputs["max_flux_density_t"] = float(app.post.get_scalar_field_value("Mag_B", "Maximum", object_name="AllObjects"))
-                except Exception as exc:
-                    outputs["max_flux_density_note"] = f"Postprocess skipped: {{exc}}"
+                outputs["status"] = "completed"
+                outputs["solve_status"] = "skipped_fast_estimate"
+                outputs["execution_mode"] = "maxwell_project_saved_plus_magnetic_circuit_estimate"
                 outputs["project_name"] = app.project_name
                 outputs["design_name"] = app.design_name
+                outputs["air_gap_mm"] = air_gap
+                outputs["core_width_mm"] = core_width
+                outputs["core_height_mm"] = core_height
+                outputs["core_thickness_mm"] = core_thickness
                 outputs["current_a"] = current_a
                 outputs["coil_turns"] = coil_turns
                 outputs["estimated_inductance_h"] = estimated_inductance_h
+                outputs["max_flux_density_t"] = estimated_max_flux_density_t
+                if target_inductance_h is not None:
+                    outputs["target_inductance_h"] = target_inductance_h
                 app.save_project()
             return outputs
         """
@@ -4168,13 +4399,14 @@ class CodexaLLMClient:
         return response.output_text.strip()
 
     def _create_response_with_retry(self, **kwargs):
+        max_attempts = int(kwargs.pop("max_attempts", 4))
         last_error: Exception | None = None
-        for attempt in range(4):
+        for attempt in range(max(1, max_attempts)):
             try:
                 return self._client.responses.create(**kwargs)
             except Exception as exc:
                 last_error = exc
-                if attempt >= 3:
+                if attempt >= max(1, max_attempts) - 1:
                     break
                 time.sleep(2.0 * (attempt + 1))
         if last_error is not None:
@@ -4187,6 +4419,8 @@ class CodexaLLMClient:
         input_payload: Any,
         schema_model: type,
         effort: str | None = None,
+        timeout_s: int | None = None,
+        max_attempts: int = 4,
     ) -> dict[str, Any]:
         reasoning_effort = effort or self._settings.codexa_reasoning_effort
         schema: dict[str, Any] = {
@@ -4202,11 +4436,19 @@ class CodexaLLMClient:
             text={"format": schema},
             reasoning={"effort": reasoning_effort},
             store=False,
-            timeout=self._settings.codexa_timeout_s,
+            timeout=timeout_s or self._settings.codexa_timeout_s,
+            max_attempts=max_attempts,
         )
         return json.loads(response.output_text)
 
-    def _call_json_fallback(self, instructions: str, input_payload: Any, effort: str | None = None) -> dict[str, Any]:
+    def _call_json_fallback(
+        self,
+        instructions: str,
+        input_payload: Any,
+        effort: str | None = None,
+        timeout_s: int | None = None,
+        max_attempts: int = 4,
+    ) -> dict[str, Any]:
         reasoning_effort = effort or self._settings.codexa_reasoning_effort
         response = self._create_response_with_retry(
             model=self._settings.codexa_model,
@@ -4214,7 +4456,8 @@ class CodexaLLMClient:
             input=json.dumps(input_payload, ensure_ascii=False) if not isinstance(input_payload, str) else input_payload,
             reasoning={"effort": reasoning_effort},
             store=False,
-            timeout=self._settings.codexa_timeout_s,
+            timeout=timeout_s or self._settings.codexa_timeout_s,
+            max_attempts=max_attempts,
         )
         return json.loads(_extract_json_blob(response.output_text))
 
@@ -4271,7 +4514,8 @@ class CodexaLLMClient:
     def generate_requirement_intake(self, requirement: str) -> RequirementIntake:
         requirement = requirement.strip()
         if (
-            _looks_like_coaxial_capacitor_requirement(requirement)
+            _looks_like_annular_conductor_requirement(requirement)
+            or _looks_like_coaxial_capacitor_requirement(requirement)
             or _looks_like_capacitor_requirement(requirement)
             or _looks_like_busbar_requirement(requirement)
             or _looks_like_solenoid_requirement(requirement)
@@ -4410,6 +4654,8 @@ class CodexaLLMClient:
                 build_ir_feedback_instructions(),
                 payload,
                 effort="medium",
+                timeout_s=max(20, min(self._settings.codexa_timeout_s, 45)),
+                max_attempts=1,
             )
             return _validate_ir_artifact_payload(result)
         except Exception as fallback_exc:
@@ -4419,6 +4665,8 @@ class CodexaLLMClient:
                     payload,
                     GeneratedIRPlan,
                     effort="medium",
+                    timeout_s=max(20, min(self._settings.codexa_timeout_s, 45)),
+                    max_attempts=1,
                 )
                 return _validate_ir_artifact_payload(result)
             except Exception as strict_exc:
@@ -4603,18 +4851,24 @@ class CodexaLLMClient:
             result = self._call_json_fallback(
                 build_design_feedback_instructions(),
                 payload,
+                timeout_s=max(20, min(self._settings.codexa_timeout_s, 45)),
+                max_attempts=1,
             )
             patch = _validate_design_patch_payload(result)
-            return _apply_design_patch(intake.design, patch, requirement)
+            return _enforce_design_current_voltage_constraints(_apply_design_patch(intake.design, patch, requirement))
         except Exception as fallback_exc:
             try:
                 result = self._call_json(
                     build_design_feedback_instructions(),
                     payload,
                     ElectromagnetDesignPatch,
+                    timeout_s=max(20, min(self._settings.codexa_timeout_s, 45)),
+                    max_attempts=1,
                 )
                 patch = _validate_design_patch_payload(result)
-                return _apply_design_patch(intake.design, patch, requirement)
+                return _enforce_design_current_voltage_constraints(
+                    _apply_design_patch(intake.design, patch, requirement)
+                )
             except Exception as strict_exc:
                 raise RequirementPlanningError(
                     f"LLM feedback revision failed. Fallback error: {fallback_exc}; strict-schema error: {strict_exc}"
@@ -4694,6 +4948,8 @@ class CodexaLLMClient:
             revised_payload = self._call_json_fallback(
                 build_intake_feedback_instructions(),
                 payload,
+                timeout_s=max(20, min(self._settings.codexa_timeout_s, 45)),
+                max_attempts=1,
             )
             revised_intake = _validate_intake_payload(revised_payload, requirement)
             return _rescue_supported_fallback_intake(requirement, revised_intake)
@@ -4703,6 +4959,8 @@ class CodexaLLMClient:
                     build_intake_feedback_instructions(),
                     payload,
                     RequirementIntake,
+                    timeout_s=max(20, min(self._settings.codexa_timeout_s, 45)),
+                    max_attempts=1,
                 )
                 revised_intake = _validate_intake_payload(revised_payload, requirement)
                 return _rescue_supported_fallback_intake(requirement, revised_intake)

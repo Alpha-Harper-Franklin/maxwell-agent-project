@@ -168,6 +168,7 @@ def render_script_from_ir(
     imports = ["import math"]
     if uses_matrix_export:
         imports.extend(["import re", "from pathlib import Path"])
+    imports.append("from maxwell_agent.pyaedt_compat import patch_pyaedt_student_version_float_bug, scrub_aedt_locks")
     imports.append(f"from ansys.aedt.core import {plan.driver}")
     if uses_matrix:
         imports.append("from ansys.aedt.core.modules.boundary.maxwell_boundary import MatrixElectric")
@@ -187,6 +188,8 @@ def render_script_from_ir(
             '    version = job.get("maxwell_version")',
             '    non_graphical = bool(job.get("non_graphical", True))',
             '    student_version = bool(job.get("student_version", False))',
+            "    patch_pyaedt_student_version_float_bug()",
+            "    scrub_aedt_locks(project_file)",
         ]
     )
     if uses_matrix_export:

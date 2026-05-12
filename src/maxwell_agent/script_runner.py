@@ -6,6 +6,12 @@ import sys
 import traceback
 from pathlib import Path
 
+try:
+    from .pyaedt_compat import prepare_generated_script_runtime
+except ImportError:  # pragma: no cover - used when this file is executed by path
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+    from maxwell_agent.pyaedt_compat import prepare_generated_script_runtime
+
 
 def _load_module(module_path: Path):
     spec = importlib.util.spec_from_file_location("generated_maxwell_job", module_path)
@@ -29,6 +35,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         module = _load_module(script_path)
         job = json.loads(job_path.read_text(encoding="utf-8"))
+        prepare_generated_script_runtime(job)
         entrypoint = str(job.get("entrypoint") or "run_job")
         if not hasattr(module, entrypoint):
             raise AttributeError(f"Generated script does not define {entrypoint}().")

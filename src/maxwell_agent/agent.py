@@ -7,7 +7,7 @@ from pathlib import Path
 
 from .config import Settings
 from .errors import RequirementPlanningError, UnknownPrimitiveError
-from .llm_client import CodexaLLMClient
+from .llm_client import CodexaLLMClient, _enforce_design_current_voltage_constraints
 from .maxwell_env import detect_maxwell_environment
 from .maxwell_executor import MaxwellExecutor
 from .models import (
@@ -171,7 +171,7 @@ class MaxwellAgent:
             if progress_callback:
                 progress_callback(66, f"第 {feedback_round + 1} 轮存在未满足约束，正在把仿真反馈回传给 AI")
             try:
-                current_intake = self._llm.revise_intake_from_feedback(
+                current_intake = self._revise_intake_with_timeout(
                     requirement=requirement,
                     intake=current_intake,
                     outputs=result.outputs,
@@ -210,6 +210,45 @@ class MaxwellAgent:
             )
         final_result.artifacts = self._dedupe_paths(all_artifacts)
         return final_result
+
+    def _revise_intake_with_timeout(
+        self,
+        requirement: str,
+        intake: RequirementIntake,
+        outputs: dict[str, float | str] | None,
+        evaluation: RequirementEvaluation | None,
+        feedback_round: int,
+    ) -> RequirementIntake:
+        if intake.design is not None:
+            revised_design = _enforce_design_current_voltage_constraints(intake.design)
+            return self._llm.replace_design_in_intake(
+                requirement=requirement,
+                intake=intake,
+                revised_design=revised_design,
+                feedback_round=feedback_round,
+                outputs=outputs,
+                evaluation=evaluation,
+            )
+        try:
+            return self._llm.revise_intake_from_feedback(
+                requirement=requirement,
+                intake=intake,
+                outputs=outputs,
+                evaluation=evaluation,
+                feedback_round=feedback_round,
+            )
+        except RequirementPlanningError:
+            if intake.design is not None:
+                revised_design = _enforce_design_current_voltage_constraints(intake.design)
+                return self._llm.replace_design_in_intake(
+                    requirement=requirement,
+                    intake=intake,
+                    revised_design=revised_design,
+                    feedback_round=feedback_round,
+                    outputs=outputs,
+                    evaluation=evaluation,
+                )
+            raise
 
     def _learn_primitive_with_repair(
         self,

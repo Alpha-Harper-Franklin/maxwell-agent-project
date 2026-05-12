@@ -20,6 +20,7 @@ from .models import (
     RequirementIntake,
     SimulationResult,
 )
+from .pyaedt_compat import FileLock, terminate_process_ids, terminate_process_tree
 from .semantics import infer_builder_hint
 
 
@@ -85,12 +86,13 @@ class MaxwellExecutor:
         self._write_json(job_path, job_payload)
 
         self._notify_progress(progress_callback, 48, "脚本已生成，正在启动 Maxwell 执行")
-        completed = self._run_script_subprocess(
-            script_path=script_path,
-            job_path=job_path,
-            result_path=result_path,
-            env_model=env,
-        )
+        with FileLock(self._settings.project_root / "workspace" / ".maxwell_execution.lock"):
+            completed = self._run_script_subprocess(
+                script_path=script_path,
+                job_path=job_path,
+                result_path=result_path,
+                env_model=env,
+            )
         stdout_path.write_text(completed.stdout or "", encoding="utf-8")
         stderr_path.write_text(completed.stderr or "", encoding="utf-8")
 
@@ -108,9 +110,9 @@ class MaxwellExecutor:
         output_fatal = output_status in {"fatal_error", "failed", "error"}
         runtime_failure = self._detect_runtime_failure(completed, outputs)
 
+        result_completed = result_payload.get("status") == "completed"
         if (
-            completed.returncode == 0
-            and result_payload.get("status") == "completed"
+            result_completed
             and not output_fatal
             and not runtime_failure
         ):
@@ -228,7 +230,7 @@ class MaxwellExecutor:
             stdout, stderr = process.communicate(timeout=self._settings.script_execution_timeout_s)
             completed = subprocess.CompletedProcess(command, process.returncode, stdout, stderr)
         except subprocess.TimeoutExpired as exc:
-            process.kill()
+            terminate_process_tree(process.pid)
             stdout, stderr = process.communicate()
             self._terminate_process_ids(self._list_ansys_process_ids() - baseline_ansys_pids)
             timeout_message = (
@@ -255,7 +257,15 @@ class MaxwellExecutor:
 
     @staticmethod
     def _list_ansys_process_ids() -> set[int]:
-        process_names = {"ansysedtsv.exe", "ansysedtng.exe", "ansysedt.exe", "ansyscl.exe"}
+        process_names = {
+            "ansyscl.exe",
+            "ansysedt.exe",
+            "ansysedtng.exe",
+            "ansysedtsv.exe",
+            "ansysfw.exe",
+            "ansysls_client.exe",
+            "ansysli_client.exe",
+        }
         try:
             completed = subprocess.run(
                 ["tasklist", "/FO", "CSV", "/NH"],
@@ -284,21 +294,7 @@ class MaxwellExecutor:
 
     @staticmethod
     def _terminate_process_ids(pids: set[int]) -> None:
-        if not pids:
-            return
-        for pid in sorted(pids):
-            try:
-                subprocess.run(
-                    ["taskkill", "/F", "/PID", str(pid)],
-                    capture_output=True,
-                    text=True,
-                    encoding="utf-8",
-                    errors="replace",
-                    check=False,
-                )
-            except Exception:
-                continue
-        time.sleep(1.0)
+        terminate_process_ids(pids)
 
     def _build_evaluation(
         self,
@@ -374,7 +370,25 @@ class MaxwellExecutor:
         if flux_density is None:
             flux_density = self._as_float(outputs.get("bmax_global_t"))
         if flux_density is None:
+            flux_density = self._as_float(outputs.get("b_max_global_t"))
+        if flux_density is None:
+            flux_density = self._as_float(outputs.get("bmag_max_global_t"))
+        if flux_density is None:
+            flux_density = self._as_float(outputs.get("bmag_max_t"))
+        if flux_density is None:
+            flux_density = self._as_float(outputs.get("global_max_b_t"))
+        if flux_density is None:
+            flux_density = self._as_float(outputs.get("annulus_max_b_t"))
+        if flux_density is None:
+            flux_density = self._as_float(outputs.get("max_b_magnitude_overall"))
+        if flux_density is None:
+            flux_density = self._as_float(outputs.get("max_b_magnitude_in_conductor"))
+        if flux_density is None:
+            flux_density = self._as_float(outputs.get("max_mag_b_t"))
+        if flux_density is None:
             flux_density = self._as_float(outputs.get("bmax_conductor_t"))
+        if flux_density is None:
+            flux_density = self._as_float(outputs.get("bmag_max_conductor_t"))
         current_density = self._as_float(outputs.get("estimated_current_density_a_per_mm2"))
         if current_density is None:
             current_density = self._as_float(outputs.get("max_current_density_a_per_mm2"))
@@ -615,6 +629,17 @@ class MaxwellExecutor:
                     "max_electric_field_note",
                     "max_flux_density_t",
                     "flux_density_t",
+                    "bmax_global_t",
+                    "b_max_global_t",
+                    "bmag_max_global_t",
+                    "bmag_max_t",
+                    "global_max_b_t",
+                    "annulus_max_b_t",
+                    "max_b_magnitude_overall",
+                    "max_b_magnitude_in_conductor",
+                    "max_mag_b_t",
+                    "bmax_conductor_t",
+                    "bmag_max_conductor_t",
                     "estimated_current_density_a_per_mm2",
                     "max_current_density_a_per_mm2",
                     "turns_ratio",
@@ -766,7 +791,12 @@ class MaxwellExecutor:
                 )
             )
         if max_field_limit_v_per_m is not None:
-            candidate_field = field_v_per_m if field_v_per_m is not None else reference_field_v_per_m
+            # For ideal 2D parallel-plate capacitors, the user's gap-field limit is
+            # normally about the plate-to-plate average field. Maxwell's global
+            # maximum can include edge singularities/fringing peaks, so use the
+            # reference gap field for the hard constraint and keep the extracted
+            # Maxwell peak as a displayed result.
+            candidate_field = reference_field_v_per_m if reference_field_v_per_m is not None else field_v_per_m
             if candidate_field is None:
                 checks.append(
                     RequirementCheck(

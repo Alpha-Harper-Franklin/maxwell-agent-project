@@ -10,8 +10,11 @@ from maxwell_agent.llm_client import (
     _build_local_script_from_capacitor_intake,
     _build_local_script_from_coaxial_capacitor_intake,
     _build_local_script_from_generic_intake,
+    _build_local_script_from_inductor_intake,
     _build_local_script_from_ir_payload,
     _build_local_script_from_solenoid_intake,
+    _enforce_design_current_voltage_constraints,
+    _estimate_design_supply_current,
     _fallback_busbar_2d_intake,
     _fallback_capacitor_intake,
     _fallback_coaxial_capacitor_2d_intake,
@@ -26,6 +29,7 @@ from maxwell_agent.llm_client import (
     CodexaLLMClient,
 )
 from maxwell_agent.maxwell_env import _normalize_version_hint
+from maxwell_agent.pyaedt_compat import normalize_aedt_version_for_float, normalize_openai_base_url
 from maxwell_agent.primitive_library import PrimitiveLibrary, PrimitiveTemplate
 from maxwell_agent.maxwell_ir import GeneratedIRPlan, MaxwellIRPlan
 from maxwell_agent.maxwell_executor import MaxwellExecutor
@@ -86,6 +90,38 @@ def test_normalize_version_hint_for_student_install() -> None:
     assert _normalize_version_hint("v252") == "2025.2"
     assert _normalize_version_hint("252") == "2025.2"
     assert _normalize_version_hint("2025.2") == "2025.2"
+
+
+def test_settings_normalizes_openai_compatible_base_url() -> None:
+    settings = Settings(_env_file=None, CODEXA_BASE_URL="https://example.com", CODEXA_API_KEY="x")
+
+    assert settings.codexa_base_url == "https://example.com/v1"
+    assert normalize_openai_base_url("https://example.com/v1") == "https://example.com/v1"
+
+
+def test_student_version_suffix_is_safe_for_numeric_pyaedt_comparison() -> None:
+    assert normalize_aedt_version_for_float("2025.2SV") == "2025.2"
+    assert normalize_aedt_version_for_float("2025.2") == "2025.2"
+
+
+def test_electromagnet_feedback_enforces_voltage_current_constraint() -> None:
+    design = ElectromagnetDesign(
+        source_requirement="做一个24V直流电磁铁，气隙2mm，电流不超过2A，尽量提高吸力，外形不要太大。",
+        supply_voltage_v=24.0,
+        current_limit_a=2.0,
+        current_a=2.0,
+        coil_turns=400,
+        coil_width_mm=12.0,
+        coil_height_mm=20.0,
+        core_thickness_mm=10.0,
+    )
+
+    revised = _enforce_design_current_voltage_constraints(design)
+    estimated_current = _estimate_design_supply_current(revised)
+
+    assert estimated_current is not None
+    assert estimated_current <= 2.0 + 1e-9
+    assert revised.current_a <= 2.0
 
 
 def test_normalize_intake_payload_enriches_physics_semantics() -> None:
@@ -1265,6 +1301,120 @@ def test_build_local_generic_annulus_script() -> None:
     assert static_check_generated_script(script).passed is True
 
 
+def test_build_local_generic_annulus_script_from_ai_shape_fields() -> None:
+    intake = RequirementIntake.model_validate(
+        {
+            "task_family": "generic_maxwell",
+            "supported_now": True,
+            "simulation_spec": {
+                "geometry": {
+                    "objects": [
+                        {
+                            "name": "annular_conductor",
+                            "shape": "annulus",
+                            "center": {"x": 0.0, "y": 0.0, "unit": "mm"},
+                            "inner_radius": {"value": 3.0, "unit": "mm"},
+                            "outer_radius": {"value": 6.0, "unit": "mm"},
+                        }
+                    ]
+                },
+                "materials": [{"object": "annular_conductor", "material": "copper"}],
+                "excitations": [
+                    {
+                        "object": "annular_conductor",
+                        "type": "total_current",
+                        "current": {"value": 100.0, "unit": "A"},
+                    }
+                ],
+                "required_outputs": [{"name": "B_max_global", "unit": "T"}],
+            },
+        }
+    )
+
+    script = _build_local_script_from_generic_intake(intake)
+
+    assert "GenericAnnular2D" in script.code
+    assert "subtract" in script.code
+    assert "assign_current" in script.code
+    assert static_check_generated_script(script).passed is True
+
+
+def test_build_local_generic_annulus_script_from_ai_primitives_subtract() -> None:
+    intake = RequirementIntake.model_validate(
+        {
+            "task_family": "generic_maxwell",
+            "supported_now": True,
+            "simulation_spec": {
+                "geometry": {
+                    "primitives": [
+                        {"name": "outer_circle", "type": "circle", "radius": {"value": 6.0, "unit": "mm"}},
+                        {"name": "inner_circle", "type": "circle", "radius": {"value": 3.0, "unit": "mm"}},
+                        {"name": "annular_conductor", "type": "subtract", "blank": "outer_circle", "tool": "inner_circle"},
+                    ]
+                },
+                "materials": [{"assignment": "annular_conductor", "chosen_material": "copper"}],
+                "excitations": [
+                    {
+                        "target": "annular_conductor",
+                        "excitation_type": "total_current",
+                        "value": 100.0,
+                    }
+                ],
+                "required_outputs": [{"name": "Bmag_max_global", "unit": "T"}],
+            },
+        }
+    )
+
+    script = _build_local_script_from_generic_intake(intake)
+
+    assert "GenericAnnular2D" in script.code
+    assert "subtract" in script.code
+    assert "assign_current" in script.code
+    assert static_check_generated_script(script).passed is True
+
+
+def test_build_local_generic_annulus_script_from_ai_operations_subtract() -> None:
+    intake = RequirementIntake.model_validate(
+        {
+            "task_family": "generic_maxwell",
+            "supported_now": True,
+            "simulation_spec": {
+                "geometry": {
+                    "primitives": [
+                        {"name": "outer_circle", "type": "circle", "center_mm": [0.0, 0.0], "radius_mm": 6.0},
+                        {"name": "inner_circle", "type": "circle", "center_mm": [0.0, 0.0], "radius_mm": 3.0},
+                    ],
+                    "operations": [
+                        {"type": "subtract", "blank": "outer_circle", "tool": "inner_circle", "result_name": "annular_conductor"}
+                    ],
+                },
+                "materials": [{"target": "annular_conductor", "material": "copper"}],
+                "excitations": [{"target": "annular_conductor", "type": "total_current", "value_A": 100.0}],
+                "required_outputs": [{"name": "global_max_magnetic_flux_density_magnitude", "unit": "T"}],
+            },
+        }
+    )
+
+    script = _build_local_script_from_generic_intake(intake)
+
+    assert "GenericAnnular2D" in script.code
+    assert "subtract" in script.code
+    assert "assign_current" in script.code
+    assert static_check_generated_script(script).passed is True
+
+
+def test_annular_conductor_requirement_uses_local_generic_ir() -> None:
+    intake = _fallback_intake_from_requirement(
+        "\u505a\u4e00\u4e2a\u4e8c\u7ef4\u540c\u5fc3\u73af\u5bfc\u4f53\u622a\u9762\uff0c\u5185\u534a\u5f843mm\uff0c\u5916\u534a\u5f846mm\uff0c\u901a\u4ee5100A\u7535\u6d41\uff0c\u8bc4\u4f30\u6700\u5927\u78c1\u5bc6\u3002"
+    )
+    script = _build_local_script_from_generic_intake(intake)
+
+    assert intake.task_family == "generic_maxwell"
+    assert "GenericAnnular2D" in script.code
+    assert "assign_current" in script.code
+    assert static_check_generated_script(script).passed is True
+
+
 def test_generic_supported_2d_prefers_local_generation() -> None:
     intake = RequirementIntake.model_validate(
         {
@@ -1432,12 +1582,138 @@ def test_generic_evaluation_accepts_bmax_aliases() -> None:
     )
     evaluation = executor._build_evaluation(
         intake,
+        outputs={"b_max_global_t": 0.0034},
+        run_status="completed",
+    )
+
+    assert evaluation.overall_status == "passed"
+    assert any(item.name == "\u78c1\u573a\u7ed3\u679c" and item.status == "passed" for item in evaluation.checks)
+
+
+def test_generic_evaluation_accepts_compact_bmax_aliases() -> None:
+    executor = MaxwellExecutor(Settings(_env_file=None, PROJECT_ROOT=r"F:\maxwell_agent_project"))
+    intake = RequirementIntake(
+        task_family="generic_maxwell",
+        supported_now=True,
+        simulation_spec={
+            "required_outputs": [{"name": "Bmax_global"}],
+        },
+        execution_plan={"execution_ready": True},
+    )
+    evaluation = executor._build_evaluation(
+        intake,
         outputs={"bmax_global_t": 0.0034},
         run_status="completed",
     )
 
     assert evaluation.overall_status == "passed"
     assert any(item.name == "\u78c1\u573a\u7ed3\u679c" and item.status == "passed" for item in evaluation.checks)
+
+
+def test_generic_evaluation_accepts_bmag_max_aliases() -> None:
+    executor = MaxwellExecutor(Settings(_env_file=None, PROJECT_ROOT=r"F:\maxwell_agent_project"))
+    intake = RequirementIntake(
+        task_family="generic_maxwell",
+        supported_now=True,
+        simulation_spec={
+            "required_outputs": [{"name": "Bmag_Max_Global"}],
+        },
+        execution_plan={"execution_ready": True},
+    )
+    evaluation = executor._build_evaluation(
+        intake,
+        outputs={"bmag_max_global_t": 0.0034},
+        run_status="completed",
+    )
+
+    assert evaluation.overall_status == "passed"
+    assert any(item.name == "\u78c1\u573a\u7ed3\u679c" and item.status == "passed" for item in evaluation.checks)
+
+
+def test_generic_evaluation_accepts_global_max_b_aliases() -> None:
+    executor = MaxwellExecutor(Settings(_env_file=None, PROJECT_ROOT=r"F:\maxwell_agent_project"))
+    intake = RequirementIntake(
+        task_family="generic_maxwell",
+        supported_now=True,
+        simulation_spec={
+            "required_outputs": [{"name": "Bmag_max_global"}],
+        },
+        execution_plan={"execution_ready": True},
+    )
+    evaluation = executor._build_evaluation(
+        intake,
+        outputs={"global_max_b_t": 0.0034},
+        run_status="completed",
+    )
+
+    assert evaluation.overall_status == "passed"
+    assert any(item.name == "\u78c1\u573a\u7ed3\u679c" and item.status == "passed" for item in evaluation.checks)
+
+
+def test_generic_evaluation_accepts_max_b_magnitude_aliases() -> None:
+    executor = MaxwellExecutor(Settings(_env_file=None, PROJECT_ROOT=r"F:\maxwell_agent_project"))
+    intake = RequirementIntake(
+        task_family="generic_maxwell",
+        supported_now=True,
+        simulation_spec={
+            "required_outputs": [{"name": "global_max_magnetic_flux_density_magnitude"}],
+        },
+        execution_plan={"execution_ready": True},
+    )
+    evaluation = executor._build_evaluation(
+        intake,
+        outputs={"max_b_magnitude_overall": 0.0034},
+        run_status="completed",
+    )
+
+    assert evaluation.overall_status == "passed"
+    assert any(item.name == "\u78c1\u573a\u7ed3\u679c" and item.status == "passed" for item in evaluation.checks)
+
+
+def test_generic_evaluation_accepts_max_mag_b_aliases() -> None:
+    executor = MaxwellExecutor(Settings(_env_file=None, PROJECT_ROOT=r"F:\maxwell_agent_project"))
+    intake = RequirementIntake(
+        task_family="generic_maxwell",
+        supported_now=True,
+        simulation_spec={
+            "required_outputs": [{"name": "B_max_global"}],
+        },
+        execution_plan={"execution_ready": True},
+    )
+    evaluation = executor._build_evaluation(
+        intake,
+        outputs={"max_mag_b_t": 0.0034},
+        run_status="completed",
+    )
+
+    assert evaluation.overall_status == "passed"
+    assert any(item.name == "\u78c1\u573a\u7ed3\u679c" and item.status == "passed" for item in evaluation.checks)
+
+
+def test_local_inductor_script_uses_fast_estimate_path() -> None:
+    intake = _fallback_intake_from_requirement(
+        "\u505a\u4e00\u4e2a\u7535\u611f\u5668\uff0c\u6c14\u96991mm\uff0c\u5305\u6570200\uff0c\u7535\u6d411A\uff0c\u76ee\u6807\u7535\u611f10mH\uff0c\u5e76\u8f93\u51fa\u6700\u5927\u78c1\u5bc6\u3002"
+    )
+    script = _build_local_script_from_inductor_intake(intake)
+
+    assert "analyze_setup" not in script.code
+    assert "skipped_fast_estimate" in script.code
+    assert '"estimated_inductance_h"' in script.code
+    assert '"max_flux_density_t"' in script.code
+
+
+def test_inductor_evaluation_passes_target_from_fast_estimate() -> None:
+    executor = MaxwellExecutor(Settings(_env_file=None, PROJECT_ROOT=r"F:\maxwell_agent_project"))
+    intake = _fallback_intake_from_requirement(
+        "\u505a\u4e00\u4e2a\u7535\u611f\u5668\uff0c\u6c14\u96991mm\uff0c\u5305\u6570200\uff0c\u7535\u6d411A\uff0c\u76ee\u6807\u7535\u611f10mH\uff0c\u5e76\u8f93\u51fa\u6700\u5927\u78c1\u5bc6\u3002"
+    )
+    evaluation = executor._build_evaluation(
+        intake,
+        outputs={"estimated_inductance_h": 0.01, "max_flux_density_t": 0.5},
+        run_status="completed",
+    )
+
+    assert evaluation.overall_status == "passed"
 
 
 def test_evaluation_for_new_generic_task_families() -> None:
@@ -1566,7 +1842,27 @@ def test_coaxial_capacitor_evaluation_fails_when_constraints_violated() -> None:
     assert any(item.name == "\u7535\u573a\u4e0a\u9650" and item.status == "failed" for item in evaluation.checks)
 
 
-def test_parallel_plate_capacitor_evaluation_fails_when_field_limit_violated() -> None:
+def test_parallel_plate_capacitor_evaluation_uses_gap_average_for_field_limit() -> None:
+    executor = MaxwellExecutor(Settings(_env_file=None, PROJECT_ROOT=r"F:\maxwell_agent_project"))
+    intake = _fallback_capacitor_intake(
+        "\u505a\u4e00\u4e2a\u4e8c\u7ef4\u5e73\u884c\u677f\u7535\u5bb9\u5668\uff0c\u677f\u95f4\u8ddd1mm\uff0c\u677f\u5bbd20mm\uff0c\u65bd\u52a0100V\uff0c\u7535\u5bb9\u81f3\u5c11 50pF\uff0c\u7535\u573a\u4e0d\u8d85\u8fc7 200000V/m\u3002"
+    )
+    evaluation = executor._build_evaluation(
+        intake,
+        outputs={
+            "capacitance_pf": 198.18,
+            "max_electric_field_note": 369654.95,
+            "reference_average_field_v_per_m": 100000.0,
+        },
+        run_status="completed",
+    )
+
+    assert evaluation.overall_status == "passed"
+    assert any(item.name == "\u7535\u5bb9\u76ee\u6807" and item.status == "passed" for item in evaluation.checks)
+    assert any(item.name == "\u7535\u573a\u4e0a\u9650" and item.status == "passed" for item in evaluation.checks)
+
+
+def test_parallel_plate_capacitor_evaluation_fails_without_gap_average_when_peak_exceeds_limit() -> None:
     executor = MaxwellExecutor(Settings(_env_file=None, PROJECT_ROOT=r"F:\maxwell_agent_project"))
     intake = _fallback_capacitor_intake(
         "\u505a\u4e00\u4e2a\u4e8c\u7ef4\u5e73\u884c\u677f\u7535\u5bb9\u5668\uff0c\u677f\u95f4\u8ddd1mm\uff0c\u677f\u5bbd20mm\uff0c\u65bd\u52a0100V\uff0c\u7535\u5bb9\u81f3\u5c11 50pF\uff0c\u7535\u573a\u4e0d\u8d85\u8fc7 200000V/m\u3002"
@@ -1581,7 +1877,6 @@ def test_parallel_plate_capacitor_evaluation_fails_when_field_limit_violated() -
     )
 
     assert evaluation.overall_status == "failed"
-    assert any(item.name == "\u7535\u5bb9\u76ee\u6807" and item.status == "passed" for item in evaluation.checks)
     assert any(item.name == "\u7535\u573a\u4e0a\u9650" and item.status == "failed" for item in evaluation.checks)
 
 

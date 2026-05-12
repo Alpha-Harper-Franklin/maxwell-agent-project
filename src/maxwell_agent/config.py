@@ -6,6 +6,8 @@ import sys
 from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from .pyaedt_compat import normalize_openai_base_url
+
 
 DEFAULT_PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
@@ -45,6 +47,11 @@ class Settings(BaseSettings):
             value = value.strip()
             return value or None
         return value
+
+    @field_validator("codexa_base_url", mode="after")
+    @classmethod
+    def _normalize_base_url(cls, value: str | None) -> str | None:
+        return normalize_openai_base_url(value)
 
     @field_validator("codexa_reasoning_effort", mode="before")
     @classmethod
