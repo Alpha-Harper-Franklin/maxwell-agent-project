@@ -2,8 +2,10 @@
 setlocal
 cd /d "%~dp0"
 
+echo.
+echo Initializing Maxwell Agent Web...
 if not exist ".venv\Scripts\python.exe" (
-  powershell -ExecutionPolicy Bypass -File ".\scripts\setup_windows.ps1"
+  powershell -NoProfile -ExecutionPolicy Bypass -File ".\scripts\setup_windows.ps1"
   if errorlevel 1 (
     echo.
     echo Setup failed. Press any key to exit.

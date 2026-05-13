@@ -2,8 +2,10 @@
 setlocal
 cd /d "%~dp0"
 
+echo.
+echo Initializing Maxwell Agent CLI...
 if not exist ".venv\Scripts\python.exe" (
-  powershell -ExecutionPolicy Bypass -File ".\scripts\setup_windows.ps1"
+  powershell -NoProfile -ExecutionPolicy Bypass -File ".\scripts\setup_windows.ps1"
   if errorlevel 1 (
     echo.
     echo Setup failed. Press any key to exit.
@@ -14,8 +16,8 @@ if not exist ".venv\Scripts\python.exe" (
 
 echo.
 echo Maxwell Agent CLI
-echo Enter a requirement and press Enter.
-echo Example: Design a 24V DC electromagnet with a 2mm air gap and current no higher than 2A.
+echo Type a Chinese or English requirement, then press Enter.
+echo Example: make a 24V DC electromagnet, air gap 2mm, current no higher than 2A, maximize force.
 echo.
 set /p REQUIREMENT=Requirement: 
 if "%REQUIREMENT%"=="" (
