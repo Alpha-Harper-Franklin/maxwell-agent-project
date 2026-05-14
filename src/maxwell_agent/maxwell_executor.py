@@ -417,7 +417,18 @@ class MaxwellExecutor:
         wants_capacitance = "电容" in requested_blob or "capacit" in requested_lower
         wants_field = "电场" in requested_blob or "electric_field" in requested_lower
         wants_flux = "磁密" in requested_blob or "磁场" in requested_blob or any(
-            token in requested_lower for token in ("flux_density", "magnetic_field", "bmax")
+            token in requested_lower
+            for token in (
+                "flux_density",
+                "magnetic_field",
+                "magnetic_flux_density",
+                "bmax",
+                "bmag",
+                "b_max",
+                "max_b",
+                "max_mag_b",
+                "global_max_b",
+            )
         )
         wants_current_density = "电流密度" in requested_blob or "current_density" in requested_lower
         wants_turns_ratio = "匝比" in requested_blob or "turns_ratio" in requested_lower

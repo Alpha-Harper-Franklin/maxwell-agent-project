@@ -8,7 +8,13 @@ from pathlib import Path
 from typing import Any
 
 from .agent import MaxwellAgent
-from .models import ElectromagnetDesign, RequirementEvaluation, RequirementIntake, SimulationResult
+from .models import (
+    CaseDeliveryReport,
+    ElectromagnetDesign,
+    RequirementEvaluation,
+    RequirementIntake,
+    SimulationResult,
+)
 
 
 ProgressCallback = Callable[[int, str], None]
@@ -71,6 +77,8 @@ OUTPUT_LABELS = {
     "estimated_secondary_voltage_v": "估算次级电压 (V)",
     "turns_ratio": "匝比",
     "estimated_inductance_h": "估算电感 (H)",
+    "center_flux_density_t": "中心磁密 (T)",
+    "estimated_force_n": "估算力 (N)",
 }
 
 OBJECTIVE_LABELS = {
@@ -111,6 +119,10 @@ class DemoBundle:
     artifact_paths: list[Path] = field(default_factory=list)
     summary_text_path: Path | None = None
     summary_html_path: Path | None = None
+    case_report_json_path: Path | None = None
+    case_report_markdown_path: Path | None = None
+    case_report_html_path: Path | None = None
+    delivery_report: CaseDeliveryReport | None = None
 
     def to_text_report(self) -> str:
         lines: list[str] = [
@@ -119,10 +131,10 @@ class DemoBundle:
             f"状态: {self.status_label}",
             f"说明: {self.message}",
             "",
-            "原始需求",
+            "原始需求:",
             self.requirement.strip(),
             "",
-            "需求判定",
+            "需求判定:",
             f"- 总体结论: {self.evaluation_status_label or '待验证'}",
         ]
         if self.evaluation_summary:
@@ -130,35 +142,51 @@ class DemoBundle:
         for row in self.evaluation_rows:
             lines.append(f"- {row.label}: {row.value}")
 
-        lines.extend(["", "设计参数 / 结构化规格"])
+        lines.extend(["", "设计参数 / 结构化规格:"])
         if self.design_rows:
-            for row in self.design_rows:
-                lines.append(f"- {row.label}: {row.value}")
+            lines.extend(f"- {row.label}: {row.value}" for row in self.design_rows)
         else:
-            lines.append("- 当前任务没有生成传统电磁铁参数表，已输出结构化仿真规格和执行结果。")
+            lines.append("- 当前任务没有传统电磁铁参数表，已输出结构化仿真规格和执行结果。")
 
         if self.output_rows:
-            lines.extend(["", "仿真输出"])
-            for row in self.output_rows:
-                lines.append(f"- {row.label}: {row.value}")
+            lines.extend(["", "仿真输出:"])
+            lines.extend(f"- {row.label}: {row.value}" for row in self.output_rows)
+
+        if self.delivery_report:
+            report = self.delivery_report
+            lines.extend(["", "单案例交付报告摘要:"])
+            lines.append(f"- 物理类型: {report.insight.physics_type}")
+            lines.append(f"- 执行构型: {report.insight.builder_hint}")
+            lines.append(f"- 迭代轮数: {len(report.iterations)}")
+            for item in report.iterations:
+                feedback = "是" if item.feedback_required else "否"
+                lines.append(f"- 第 {item.index} 轮: {item.evaluation_status}，需要反馈修正: {feedback}")
+            if report.insight.geometry_objects:
+                lines.append("- 识别到的几何对象:")
+                lines.extend(
+                    f"  {item.get('name', '')}: {item.get('role', '')} {item.get('detail', '')}".rstrip()
+                    for item in report.insight.geometry_objects
+                )
+            if report.insight.knowledge_items:
+                lines.append("- 知识沉淀:")
+                lines.extend(f"  {item}" for item in report.insight.knowledge_items)
 
         if self.assumptions:
-            lines.extend(["", "关键假设"])
-            for item in self.assumptions:
-                lines.append(f"- {item}")
+            lines.extend(["", "关键假设:"])
+            lines.extend(f"- {item}" for item in self.assumptions)
 
         if self.warnings:
-            lines.extend(["", "注意事项"])
-            for item in self.warnings:
-                lines.append(f"- {item}")
+            lines.extend(["", "注意事项:"])
+            lines.extend(f"- {item}" for item in self.warnings)
 
         lines.extend(["", f"运行目录: {self.run_directory}"])
         if self.project_file:
             lines.append(f"项目文件: {self.project_file}")
+        if self.case_report_html_path:
+            lines.append(f"单案例交付报告: {self.case_report_html_path}")
         if self.artifact_paths:
-            lines.append("产物文件")
-            for artifact in self.artifact_paths:
-                lines.append(f"- {artifact}")
+            lines.append("产物文件:")
+            lines.extend(f"- {artifact}" for artifact in self.artifact_paths)
         return "\n".join(lines)
 
     def to_html_document(self, page_title: str = "Maxwell 智能体运行结果") -> str:
@@ -167,25 +195,19 @@ class DemoBundle:
             f'<div class="subtle">{escape(str(path))}</div></li>'
             for path in self.artifact_paths
         )
-        design_rows = "".join(
-            f"<tr><th>{escape(row.label)}</th><td>{escape(row.value)}</td></tr>"
-            for row in self.design_rows
-        ) or "<tr><th>当前状态</th><td>当前任务没有生成传统电磁铁参数表，已输出结构化仿真规格和执行结果。</td></tr>"
-        output_rows = "".join(
-            f"<tr><th>{escape(row.label)}</th><td>{escape(row.value)}</td></tr>"
-            for row in self.output_rows
-        ) or "<tr><th>暂无输出</th><td>本次运行没有生成额外输出。</td></tr>"
-        evaluation_rows = "".join(
-            f"<tr><th>{escape(row.label)}</th><td>{escape(row.value)}</td></tr>"
-            for row in self.evaluation_rows
-        ) or "<tr><th>暂无判定</th><td>当前没有生成需求判定明细。</td></tr>"
-        assumption_items = "".join(f"<li>{escape(item)}</li>" for item in self.assumptions) or "<li>无</li>"
-        warning_items = "".join(f"<li>{escape(item)}</li>" for item in self.warnings) or "<li>无</li>"
+        design_rows = _rows_to_html(self.design_rows) or (
+            "<tr><th>当前状态</th><td>当前任务没有传统电磁铁参数表，已输出结构化仿真规格和执行结果。</td></tr>"
+        )
+        output_rows = _rows_to_html(self.output_rows) or "<tr><th>暂无输出</th><td>本次运行没有生成额外输出。</td></tr>"
+        evaluation_rows = _rows_to_html(self.evaluation_rows) or "<tr><th>暂无判定</th><td>当前没有生成需求判定明细。</td></tr>"
+        assumption_items = _items_to_html(self.assumptions or ["无"])
+        warning_items = _items_to_html(self.warnings or ["无"])
         project_line = (
             f'<a href="{escape(self.project_file.resolve().as_uri())}">{escape(self.project_file.name)}</a>'
             if self.project_file
             else "尚未生成"
         )
+        delivery_section = _render_delivery_report_section(self.delivery_report, self.case_report_html_path)
 
         return f"""<!doctype html>
 <html lang="zh-CN">
@@ -213,14 +235,11 @@ class DemoBundle:
       background: linear-gradient(180deg, #f7f2e7 0%, #efe7d9 100%);
       min-height: 100vh;
     }}
-    .shell {{
-      width: min(1120px, calc(100vw - 32px));
-      margin: 24px auto 40px;
-    }}
+    .shell {{ width: min(1120px, calc(100vw - 32px)); margin: 24px auto 40px; }}
     .hero {{
       background: linear-gradient(135deg, rgba(36, 92, 74, 0.96), rgba(23, 59, 48, 0.98));
       color: #f4f0e8;
-      border-radius: 20px;
+      border-radius: 14px;
       padding: 28px 30px;
       box-shadow: var(--shadow);
     }}
@@ -233,62 +252,29 @@ class DemoBundle:
       border: 1px solid rgba(255, 255, 255, 0.18);
       font-weight: 700;
     }}
-    .grid {{
-      display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
-      gap: 18px;
-      margin-top: 18px;
-    }}
+    .grid {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 18px; margin-top: 18px; }}
     .panel {{
       background: var(--panel);
       border: 1px solid var(--line);
-      border-radius: 14px;
+      border-radius: 10px;
       padding: 22px;
       box-shadow: var(--shadow);
     }}
-    .panel h2 {{
-      margin: 0 0 14px;
-      font-size: 18px;
-      color: var(--accent-strong);
-    }}
-    .subtle {{
-      margin-top: 6px;
-      color: var(--muted);
-      font-size: 13px;
-      line-height: 1.5;
-      word-break: break-all;
-    }}
+    .panel h2 {{ margin: 0 0 14px; font-size: 18px; color: var(--accent-strong); }}
+    .subtle {{ margin-top: 6px; color: var(--muted); font-size: 13px; line-height: 1.5; word-break: break-all; }}
     .mono {{
       font-family: "Consolas", "SFMono-Regular", monospace;
       background: rgba(36, 92, 74, 0.06);
-      border-radius: 10px;
+      border-radius: 8px;
       padding: 14px;
       line-height: 1.6;
       white-space: pre-wrap;
       word-break: break-word;
     }}
-    table {{
-      width: 100%;
-      border-collapse: collapse;
-    }}
-    th, td {{
-      text-align: left;
-      vertical-align: top;
-      border-bottom: 1px solid var(--line);
-      padding: 10px 0;
-      font-size: 14px;
-    }}
-    th {{
-      width: 42%;
-      color: var(--muted);
-      font-weight: 600;
-      padding-right: 16px;
-    }}
-    ul {{
-      margin: 0;
-      padding-left: 20px;
-      line-height: 1.7;
-    }}
+    table {{ width: 100%; border-collapse: collapse; }}
+    th, td {{ text-align: left; vertical-align: top; border-bottom: 1px solid var(--line); padding: 10px 0; font-size: 14px; }}
+    th {{ width: 42%; color: var(--muted); font-weight: 600; padding-right: 16px; }}
+    ul {{ margin: 0; padding-left: 20px; line-height: 1.7; }}
     a {{ color: var(--accent); text-decoration: none; }}
     a:hover {{ text-decoration: underline; }}
     .warn li {{ color: var(--warn); }}
@@ -327,6 +313,8 @@ class DemoBundle:
         <table>{output_rows}</table>
       </section>
     </div>
+
+    {delivery_section}
 
     <div class="grid">
       <section class="panel">
@@ -370,6 +358,7 @@ def build_demo_bundle(requirement: str, result: SimulationResult) -> DemoBundle:
     intake = result.intake
     artifact_paths = _dedupe_paths(result.artifacts)
     evaluation = result.evaluation
+    report = result.delivery_report
     return DemoBundle(
         requirement=requirement,
         generated_at=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
@@ -386,6 +375,10 @@ def build_demo_bundle(requirement: str, result: SimulationResult) -> DemoBundle:
         assumptions=list(design.assumptions) if design else list(intake.assumptions) if intake else [],
         warnings=list(design.warnings) if design else list(intake.warnings) if intake else [result.message],
         artifact_paths=artifact_paths,
+        delivery_report=report,
+        case_report_json_path=result.run_directory / "case_delivery_report.json" if report else None,
+        case_report_markdown_path=result.run_directory / "case_delivery_report.md" if report else None,
+        case_report_html_path=result.run_directory / "case_delivery_report.html" if report else None,
     )
 
 
@@ -459,6 +452,105 @@ def _build_evaluation_rows(evaluation: RequirementEvaluation | None) -> list[Dis
     ]
 
 
+def _render_delivery_report_section(report: CaseDeliveryReport | None, html_path: Path | None) -> str:
+    if report is None:
+        return ""
+    geometry_rows = _named_items_to_rows(report.insight.geometry_objects) or "<tr><th>暂无</th><td>本次没有识别到几何对象。</td></tr>"
+    constraint_rows = _named_items_to_rows(report.insight.constraint_items) or "<tr><th>暂无</th><td>本次没有抽取到可验证约束。</td></tr>"
+    capability_rows = _capability_items_to_rows(report.insight.capability_items) or "<tr><th>暂无</th><td>本次没有形成能力图。</td></tr>"
+    residual_rows = _residual_items_to_rows(report.insight.residual_items) or "<tr><th>暂无</th><td>当前没有未满足约束残差。</td></tr>"
+    iteration_rows = "".join(
+        f"<tr><th>第 {item.index} 轮</th><td>状态 {escape(str(item.status))}，需求判定 {escape(str(item.evaluation_status))}，"
+        f"反馈修正 {escape('是' if item.feedback_required else '否')}<div class=\"subtle\">"
+        f"{escape(item.feedback_reason or item.ir_patch_summary or item.message)}</div></td></tr>"
+        for item in report.iterations
+    ) or "<tr><th>暂无</th><td>本次没有记录到迭代过程。</td></tr>"
+    knowledge = _items_to_html(report.insight.knowledge_items or ["本次没有新增原语规则。"])
+    link = (
+        f'<a href="{escape(html_path.resolve().as_uri())}">打开完整单案例交付报告</a>'
+        if html_path and html_path.exists()
+        else "完整报告已写入运行目录。"
+    )
+    return f"""
+    <div class="grid">
+      <section class="panel">
+        <h2>闭环迭代过程</h2>
+        <table>{iteration_rows}</table>
+        <div class="subtle">{link}</div>
+      </section>
+      <section class="panel">
+        <h2>几何感知</h2>
+        <table>{geometry_rows}</table>
+      </section>
+    </div>
+    <div class="grid">
+      <section class="panel">
+        <h2>能力图</h2>
+        <table>{capability_rows}</table>
+      </section>
+      <section class="panel">
+        <h2>残差反馈</h2>
+        <table>{residual_rows}</table>
+      </section>
+    </div>
+    <div class="grid">
+      <section class="panel">
+        <h2>约束解释</h2>
+        <table>{constraint_rows}</table>
+      </section>
+      <section class="panel">
+        <h2>知识沉淀</h2>
+        <ul>{knowledge}</ul>
+      </section>
+    </div>
+"""
+
+
+def _rows_to_html(rows: list[DisplayRow]) -> str:
+    return "".join(f"<tr><th>{escape(row.label)}</th><td>{escape(row.value)}</td></tr>" for row in rows)
+
+
+def _items_to_html(items: list[str]) -> str:
+    return "".join(f"<li>{escape(item)}</li>" for item in items)
+
+
+def _named_items_to_rows(items: list[dict[str, str]]) -> str:
+    rows = []
+    for item in items:
+        label = item.get("name") or "未命名"
+        value = "，".join(part for part in (item.get("role", ""), item.get("detail", "")) if part)
+        rows.append(f"<tr><th>{escape(label)}</th><td>{escape(value)}</td></tr>")
+    return "".join(rows)
+
+
+def _capability_items_to_rows(items: list[dict[str, Any]]) -> str:
+    rows = []
+    for item in items:
+        label = str(item.get("label") or item.get("key") or "能力")
+        count = item.get("count")
+        value = f"{item.get('layer', '')}"
+        if count:
+            value = f"{value}，数量 {count}"
+        rows.append(f"<tr><th>{escape(label)}</th><td>{escape(value)}</td></tr>")
+    return "".join(rows)
+
+
+def _residual_items_to_rows(items: list[dict[str, Any]]) -> str:
+    rows = []
+    for item in items:
+        label = str(item.get("name") or "约束")
+        actual = item.get("actual")
+        target = item.get("target")
+        relation = item.get("relation") or ""
+        residual = item.get("residual")
+        if actual is not None and target is not None:
+            value = f"实际 {actual} {relation} 目标 {target}，残差 {residual}"
+        else:
+            value = str(item.get("detail") or "未能量化，但已记录为待反馈约束。")
+        rows.append(f"<tr><th>{escape(label)}</th><td>{escape(value)}</td></tr>")
+    return "".join(rows)
+
+
 def _format_value(value: Any) -> str:
     if value is None:
         return "未设置"
@@ -470,6 +562,8 @@ def _format_value(value: Any) -> str:
         return f"{value:.4f}".rstrip("0").rstrip(".")
     if isinstance(value, list):
         return ", ".join(_format_value(item) for item in value) or "无"
+    if isinstance(value, dict):
+        return ", ".join(f"{key}={_format_value(item)}" for key, item in value.items()) or "无"
     return str(value)
 
 

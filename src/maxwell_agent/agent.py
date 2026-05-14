@@ -6,8 +6,16 @@ from datetime import datetime
 from pathlib import Path
 
 from .config import Settings
+from .case_report import (
+    build_case_delivery_report,
+    build_case_insight,
+    build_iteration_record,
+    persist_case_delivery_report,
+)
+from .capability_graph import capability_graph_for_intake
 from .errors import RequirementPlanningError, UnknownPrimitiveError
-from .llm_client import CodexaLLMClient, _enforce_design_current_voltage_constraints
+from .experience import ExperienceStore, FailureExperience
+from .llm_client import CodexaLLMClient
 from .maxwell_env import detect_maxwell_environment
 from .maxwell_executor import MaxwellExecutor
 from .models import (
@@ -16,9 +24,11 @@ from .models import (
     RequirementCheck,
     RequirementEvaluation,
     RequirementIntake,
+    IterationRecord,
     ScriptStaticCheck,
     SimulationResult,
 )
+from .residuals import analyze_requirement_residuals
 from .semantics import infer_builder_hint, intake_has_generic_object_graph
 from .script_validation import static_check_generated_script
 
@@ -31,6 +41,7 @@ class MaxwellAgent:
         self._settings = settings
         self._llm = CodexaLLMClient(settings)
         self._executor = MaxwellExecutor(settings)
+        self._experience_store = ExperienceStore(settings.experience_store_path)
 
     def intake(self, requirement: str) -> RequirementIntake:
         initial = self._llm.generate_requirement_intake(requirement)
@@ -50,6 +61,7 @@ class MaxwellAgent:
         self._settings.ensure_dirs()
         run_dir = self._create_run_directory()
         all_artifacts: list[Path] = []
+        iteration_records: list[IterationRecord] = []
 
         if progress_callback:
             progress_callback(10, "正在调用 AI 进行需求结构化")
@@ -62,16 +74,17 @@ class MaxwellAgent:
             intake = self._llm.refine_requirement_intake(requirement, intake_round1)
             all_artifacts.extend(self._persist_intake_artifacts(run_dir, requirement, intake, round_name="final"))
         except RequirementPlanningError as exc:
-            return self._build_blocked_result(
+            blocked = self._build_blocked_result(
                 requirement=requirement,
                 run_dir=run_dir,
                 error=exc,
                 progress_callback=progress_callback,
                 extra_artifacts=all_artifacts,
             )
+            return self._finalize_result(requirement, blocked, iteration_records)
 
         if not self._intake_is_executable(intake):
-            return self._build_blocked_result(
+            blocked = self._build_blocked_result(
                 requirement=requirement,
                 run_dir=run_dir,
                 error=RequirementPlanningError(
@@ -82,6 +95,7 @@ class MaxwellAgent:
                 progress_callback=progress_callback,
                 extra_artifacts=all_artifacts,
             )
+            return self._finalize_result(requirement, blocked, iteration_records)
 
         current_intake = intake
         final_result: SimulationResult | None = None
@@ -134,7 +148,7 @@ class MaxwellAgent:
                         if committed_templates:
                             self._llm.primitive_library.commit(committed_templates)
                 except RequirementPlanningError as learn_exc:
-                    return self._build_blocked_result(
+                    blocked = self._build_blocked_result(
                         requirement=requirement,
                         run_dir=run_dir,
                         error=RequirementPlanningError(
@@ -145,8 +159,9 @@ class MaxwellAgent:
                         progress_callback=progress_callback,
                         extra_artifacts=self._dedupe_paths(all_artifacts),
                     )
+                    return self._finalize_result(requirement, blocked, iteration_records)
             except RequirementPlanningError as exc:
-                return self._build_blocked_result(
+                blocked = self._build_blocked_result(
                     requirement=requirement,
                     run_dir=run_dir,
                     error=RequirementPlanningError(
@@ -157,19 +172,54 @@ class MaxwellAgent:
                     progress_callback=progress_callback,
                     extra_artifacts=self._dedupe_paths(all_artifacts),
                 )
+                return self._finalize_result(requirement, blocked, iteration_records)
             all_artifacts.extend(result.artifacts)
             result.intake = current_intake
             result.artifacts = self._dedupe_paths(all_artifacts)
             final_result = result
+            feedback_required = self._needs_feedback_iteration(result)
+            feedback_reason = self._feedback_reason(result) if feedback_required else ""
+            iteration_records.append(
+                build_iteration_record(
+                    index=feedback_round + 1,
+                    result=result,
+                    intake=current_intake,
+                    requirement=requirement,
+                    feedback_required=feedback_required,
+                    feedback_reason=feedback_reason,
+                )
+            )
+            self._persist_iteration_history(run_dir, iteration_records)
 
-            if not self._needs_feedback_iteration(result):
-                return result
+            if not feedback_required:
+                if feedback_round > 0:
+                    self._record_feedback_experience(
+                        requirement=requirement,
+                        run_dir=run_dir,
+                        result=result,
+                        intake=current_intake,
+                        stage="feedback_resolved",
+                        repair_summary="反馈迭代后约束已通过。",
+                        resolved=True,
+                    )
+                result.artifacts = self._dedupe_paths([*result.artifacts, run_dir / "iteration_history.json"])
+                return self._finalize_result(requirement, result, iteration_records)
 
             if feedback_round >= self._settings.design_feedback_max_iters:
-                return result
+                result.artifacts = self._dedupe_paths([*result.artifacts, run_dir / "iteration_history.json"])
+                return self._finalize_result(requirement, result, iteration_records)
 
             if progress_callback:
                 progress_callback(66, f"第 {feedback_round + 1} 轮存在未满足约束，正在把仿真反馈回传给 AI")
+            self._record_feedback_experience(
+                requirement=requirement,
+                run_dir=run_dir,
+                result=result,
+                intake=current_intake,
+                stage="constraint_feedback",
+                repair_summary=feedback_reason,
+                resolved=False,
+            )
             try:
                 current_intake = self._revise_intake_with_timeout(
                     requirement=requirement,
@@ -179,7 +229,7 @@ class MaxwellAgent:
                     feedback_round=feedback_round + 1,
                 )
             except RequirementPlanningError as exc:
-                return self._build_blocked_result(
+                blocked = self._build_blocked_result(
                     requirement=requirement,
                     run_dir=run_dir,
                     error=RequirementPlanningError(
@@ -190,6 +240,7 @@ class MaxwellAgent:
                     progress_callback=progress_callback,
                     extra_artifacts=self._dedupe_paths(all_artifacts),
                 )
+                return self._finalize_result(requirement, blocked, iteration_records)
             all_artifacts.extend(
                 self._persist_feedback_artifacts(
                     run_dir=run_dir,
@@ -201,15 +252,16 @@ class MaxwellAgent:
             )
 
         if final_result is None:
-            return self._build_blocked_result(
+            blocked = self._build_blocked_result(
                 requirement=requirement,
                 run_dir=run_dir,
                 error=RequirementPlanningError("未能产生可执行结果。", reason_code="execution_failed", intake=intake),
                 progress_callback=progress_callback,
                 extra_artifacts=self._dedupe_paths(all_artifacts),
             )
+            return self._finalize_result(requirement, blocked, iteration_records)
         final_result.artifacts = self._dedupe_paths(all_artifacts)
-        return final_result
+        return self._finalize_result(requirement, final_result, iteration_records)
 
     def _revise_intake_with_timeout(
         self,
@@ -219,16 +271,6 @@ class MaxwellAgent:
         evaluation: RequirementEvaluation | None,
         feedback_round: int,
     ) -> RequirementIntake:
-        if intake.design is not None:
-            revised_design = _enforce_design_current_voltage_constraints(intake.design)
-            return self._llm.replace_design_in_intake(
-                requirement=requirement,
-                intake=intake,
-                revised_design=revised_design,
-                feedback_round=feedback_round,
-                outputs=outputs,
-                evaluation=evaluation,
-            )
         try:
             return self._llm.revise_intake_from_feedback(
                 requirement=requirement,
@@ -238,17 +280,40 @@ class MaxwellAgent:
                 feedback_round=feedback_round,
             )
         except RequirementPlanningError:
-            if intake.design is not None:
-                revised_design = _enforce_design_current_voltage_constraints(intake.design)
-                return self._llm.replace_design_in_intake(
-                    requirement=requirement,
-                    intake=intake,
-                    revised_design=revised_design,
-                    feedback_round=feedback_round,
-                    outputs=outputs,
-                    evaluation=evaluation,
-                )
             raise
+
+    def _record_feedback_experience(
+        self,
+        requirement: str,
+        run_dir: Path,
+        result: SimulationResult,
+        intake: RequirementIntake,
+        stage: str,
+        repair_summary: str,
+        resolved: bool,
+    ) -> None:
+        evaluation = result.evaluation
+        failed_checks: list[str] = []
+        if evaluation is not None:
+            failed_checks = [check.detail for check in evaluation.checks if check.status == "failed"]
+        try:
+            self._experience_store.append(
+                FailureExperience(
+                    requirement=requirement,
+                    run_directory=str(run_dir),
+                    stage=stage,
+                    physics_type=(result.insight.physics_type if result.insight else "unknown"),
+                    builder_hint=infer_builder_hint(intake, requirement=requirement),
+                    failed_checks=failed_checks,
+                    residual_items=analyze_requirement_residuals(result.outputs, evaluation),
+                    capability_items=capability_graph_for_intake(intake, requirement=requirement),
+                    outputs=dict(result.outputs or {}),
+                    repair_summary=repair_summary,
+                    resolved=resolved,
+                )
+            )
+        except Exception:
+            return
 
     def _learn_primitive_with_repair(
         self,
@@ -464,6 +529,15 @@ class MaxwellAgent:
             return False
         return True
 
+    @staticmethod
+    def _feedback_reason(result: SimulationResult) -> str:
+        if not result.evaluation:
+            return ""
+        failed = [check.detail for check in result.evaluation.checks if check.status == "failed"]
+        if failed:
+            return "；".join(failed)
+        return result.evaluation.summary
+
     def _persist_feedback_artifacts(
         self,
         run_dir: Path,
@@ -487,6 +561,36 @@ class MaxwellAgent:
             encoding="utf-8",
         )
         return [design_path, *intake_artifacts]
+
+    def _finalize_result(
+        self,
+        requirement: str,
+        result: SimulationResult,
+        iteration_records: list[IterationRecord],
+    ) -> SimulationResult:
+        result.iterations = list(iteration_records)
+        result.insight = build_case_insight(
+            intake=result.intake,
+            outputs=result.outputs,
+            evaluation=result.evaluation,
+            artifacts=result.artifacts,
+            requirement=requirement,
+        )
+        history_path = self._persist_iteration_history(result.run_directory, iteration_records)
+        report = build_case_delivery_report(requirement=requirement, result=result, iterations=iteration_records)
+        report_paths = persist_case_delivery_report(report, result.run_directory)
+        report.artifact_paths = self._dedupe_paths([*report.artifact_paths, *report_paths])
+        result.delivery_report = report
+        result.artifacts = self._dedupe_paths([*result.artifacts, history_path, *report_paths])
+        return result
+
+    def _persist_iteration_history(self, run_dir: Path, records: list[IterationRecord]) -> Path:
+        history_path = run_dir / "iteration_history.json"
+        history_path.write_text(
+            json.dumps([record.model_dump(mode="json") for record in records], ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        return history_path
 
     def smoke_llm(self) -> str:
         return self._llm.smoke_test()

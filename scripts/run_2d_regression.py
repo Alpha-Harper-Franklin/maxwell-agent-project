@@ -4,6 +4,7 @@ import json
 import sys
 from datetime import datetime
 from pathlib import Path
+from uuid import uuid4
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -44,6 +45,10 @@ CASES = [
         "name": "transformer_2d",
         "requirement": "\u505a\u4e00\u4e2a10000V\u5230220V\u5de5\u9891\u53d8\u538b\u5668\uff0c\u8f93\u51fa\u531d\u6bd4\u3001\u6b21\u7ea7\u7535\u538b\u4f30\u7b97\u548c\u6700\u5927\u78c1\u5bc6\u3002",
     },
+    {
+        "name": "compact_relay_actuator_2d",
+        "requirement": "\u505a\u4e00\u4e2a\u7d27\u51d1\u76f4\u6d41\u7ee7\u7535\u5668\u7535\u78c1\u6267\u884c\u5668\u4e8c\u7ef4\u622a\u9762\uff0c\u4f9b\u753524V\uff0c\u6c14\u96991.5mm\uff0c\u7535\u6d41\u4e0d\u8d85\u8fc72A\uff0c\u7ebf\u5708\u5916\u5f62\u4e0d\u8d85\u8fc730mm\u4e5825mm\uff0c\u6700\u5927\u78c1\u5bc6\u4e0d\u8d85\u8fc71.8T\uff0c\u5c3d\u91cf\u63d0\u9ad8\u6c14\u9699\u5438\u529b\uff0c\u8f93\u51fa\u7535\u6d41\u3001\u5438\u529b\u3001\u6700\u5927\u78c1\u5bc6\u548c\u6bcf\u4e2a\u7ea6\u675f\u662f\u5426\u6ee1\u8db3\u3002",
+    },
 ]
 
 
@@ -54,7 +59,7 @@ def main() -> int:
         print(json.dumps({"error": "no matching cases"}, ensure_ascii=False))
         return 2
 
-    timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    timestamp = f"{datetime.now().strftime('%Y%m%d-%H%M%S')}-{uuid4().hex[:6]}"
     summary_dir = PROJECT_ROOT / "artifacts" / f"regression_2d_{timestamp}"
     summary_dir.mkdir(parents=True, exist_ok=True)
     summary_path = summary_dir / "summary.json"

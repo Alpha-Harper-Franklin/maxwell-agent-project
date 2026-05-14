@@ -235,6 +235,54 @@ def build_ir_feedback_instructions() -> str:
     ).strip()
 
 
+def build_ir_patch_feedback_instructions() -> str:
+    return dedent(
+        """
+        You revise a Maxwell IR plan by returning a small, checkable patch.
+        Input will contain:
+        - original requirement
+        - current intake JSON
+        - current IR artifact JSON
+        - previous scalar outputs
+        - previous evaluation JSON
+        - residuals extracted from failed constraints
+        - feedback_round
+        - allowed_patch_operations
+
+        Return one strict JSON object with:
+        - summary: short Simplified Chinese explanation of the intended repair
+        - actions: a list of patch actions
+        - expected_effects: Simplified Chinese list
+        - warnings: Simplified Chinese list
+
+        Patch action schema:
+        - operation: one of set_parameter_default, set_local_expression, set_object_material, add_warning
+        - target: for set_parameter_default use an existing ir_plan.parameters[].name; for set_local_expression use
+          an existing ir_plan.locals[].name; for set_object_material use an existing ir_plan.objects[].name
+        - value: the new value or expression
+        - reason: short Simplified Chinese reason
+
+        Rules:
+        - Preserve the user's hard numeric constraints.
+        - Do not return a full IR plan in this mode.
+        - Only modify existing IR parameters, locals, or object material. Do not invent target names.
+        - Use residuals first. If a failed constraint has actual, target, relation, compute the direction and size of
+          the change from that residual instead of making a vague suggestion.
+        - If current density is too high, increase existing conductor width/thickness parameters when available; reduce
+          current only when the user allows it.
+        - If magnetic flux density is too high, increase existing gap/spacing/geometry-size parameters when available;
+          reduce current only when allowed.
+        - If capacitance is too low, increase existing plate width/overlap/radius parameters or decrease existing gap
+          parameters while preserving voltage constraints.
+        - If electric field is too high, increase existing spacing/air-gap parameters or reduce voltage only when allowed.
+        - If no safe patch exists with current targets, return actions=[] and explain the missing adjustable parameter
+          in warnings.
+        - All natural-language fields must be Simplified Chinese.
+        - Return JSON only.
+        """
+    ).strip()
+
+
 def build_primitive_template_generation_instructions() -> str:
     return dedent(
         """
@@ -387,6 +435,7 @@ def build_design_feedback_instructions() -> str:
 
         Return one JSON object matching ElectromagnetDesignPatch only.
         Only include fields that must change for the next run. Leave all other fields null.
+        Use exactly the patch_schema keys supplied in the input.
 
         Main goal:
         - preserve all hard numeric constraints from the user
@@ -405,6 +454,8 @@ def build_design_feedback_instructions() -> str:
 
         Rules:
         - output JSON only
+        - include assumptions and warnings as arrays, even when empty
+        - do not omit required schema keys; set unused scalar fields to null
         - no markdown
         - all natural-language fields must be Simplified Chinese
         """

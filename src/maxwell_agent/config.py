@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 import sys
 
-from pydantic import Field, field_validator
+from pydantic import AliasChoices, Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from .pyaedt_compat import normalize_openai_base_url
@@ -17,19 +17,32 @@ class Settings(BaseSettings):
         env_file=".env",
         env_file_encoding="utf-8",
         extra="ignore",
+        populate_by_name=True,
     )
 
-    project_root: Path = Field(default=DEFAULT_PROJECT_ROOT, validation_alias="PROJECT_ROOT")
-    codexa_base_url: str | None = None
-    codexa_api_key: str | None = None
-    codexa_model: str = "gpt-5.4"
-    codexa_reasoning_effort: str = "high"
-    codexa_timeout_s: int = 180
-    script_execution_timeout_s: int = 240
-    maxwell_version: str | None = None
-    maxwell_non_graphical: bool = True
-    script_max_repairs: int = 2
-    design_feedback_max_iters: int = 2
+    project_root: Path = Field(default=DEFAULT_PROJECT_ROOT, validation_alias=AliasChoices("PROJECT_ROOT", "project_root"))
+    codexa_base_url: str | None = Field(default=None, validation_alias=AliasChoices("CODEXA_BASE_URL", "codexa_base_url"))
+    codexa_api_key: str | None = Field(default=None, validation_alias=AliasChoices("CODEXA_API_KEY", "codexa_api_key"))
+    codexa_model: str = Field(default="gpt-5.4", validation_alias=AliasChoices("CODEXA_MODEL", "codexa_model"))
+    codexa_reasoning_effort: str = Field(
+        default="high",
+        validation_alias=AliasChoices("CODEXA_REASONING_EFFORT", "codexa_reasoning_effort"),
+    )
+    codexa_timeout_s: int = Field(default=180, validation_alias=AliasChoices("CODEXA_TIMEOUT_S", "codexa_timeout_s"))
+    script_execution_timeout_s: int = Field(
+        default=240,
+        validation_alias=AliasChoices("SCRIPT_EXECUTION_TIMEOUT_S", "script_execution_timeout_s"),
+    )
+    maxwell_version: str | None = Field(default=None, validation_alias=AliasChoices("MAXWELL_VERSION", "maxwell_version"))
+    maxwell_non_graphical: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("MAXWELL_NON_GRAPHICAL", "maxwell_non_graphical"),
+    )
+    script_max_repairs: int = Field(default=2, validation_alias=AliasChoices("SCRIPT_MAX_REPAIRS", "script_max_repairs"))
+    design_feedback_max_iters: int = Field(
+        default=2,
+        validation_alias=AliasChoices("DESIGN_FEEDBACK_MAX_ITERS", "design_feedback_max_iters"),
+    )
 
     @field_validator("project_root", mode="before")
     @classmethod
@@ -85,6 +98,10 @@ class Settings(BaseSettings):
         if root_level.exists():
             return root_level
         return self.knowledge_dir / "primitive_library.json"
+
+    @property
+    def experience_store_path(self) -> Path:
+        return self.knowledge_dir / "failure_experience.json"
 
     @property
     def runtime_python(self) -> Path:

@@ -133,6 +133,53 @@ class RequirementEvaluation(BaseModel):
     checks: list[RequirementCheck] = Field(default_factory=list)
 
 
+class CaseInsight(BaseModel):
+    physics_type: str = "unknown"
+    helper_label: str = "unknown"
+    builder_hint: str = "unknown"
+    capability_items: list[dict[str, Any]] = Field(default_factory=list)
+    geometry_objects: list[dict[str, str]] = Field(default_factory=list)
+    constraint_items: list[dict[str, str]] = Field(default_factory=list)
+    output_items: list[dict[str, str]] = Field(default_factory=list)
+    residual_items: list[dict[str, Any]] = Field(default_factory=list)
+    knowledge_items: list[str] = Field(default_factory=list)
+    engineering_explanations: list[str] = Field(default_factory=list)
+
+
+class IterationRecord(BaseModel):
+    index: int
+    stage: str = "execute"
+    status: RunStatus | str = "failed"
+    evaluation_status: RequirementOverallStatus | str = "unverified"
+    message: str = ""
+    feedback_required: bool = False
+    feedback_reason: str = ""
+    design_snapshot: dict[str, Any] = Field(default_factory=dict)
+    output_snapshot: dict[str, Any] = Field(default_factory=dict)
+    failed_checks: list[str] = Field(default_factory=list)
+    passed_checks: list[str] = Field(default_factory=list)
+    unverified_checks: list[str] = Field(default_factory=list)
+    residual_items: list[dict[str, Any]] = Field(default_factory=list)
+    ir_patch_summary: str = ""
+    insight: CaseInsight = Field(default_factory=CaseInsight)
+
+
+class CaseDeliveryReport(BaseModel):
+    requirement: str
+    generated_at: str
+    run_directory: Path
+    project_file: Path | None = None
+    final_status: RunStatus | str
+    final_evaluation_status: RequirementOverallStatus | str = "unverified"
+    final_summary: str = ""
+    final_outputs: dict[str, Any] = Field(default_factory=dict)
+    assumptions: list[str] = Field(default_factory=list)
+    warnings: list[str] = Field(default_factory=list)
+    insight: CaseInsight = Field(default_factory=CaseInsight)
+    iterations: list[IterationRecord] = Field(default_factory=list)
+    artifact_paths: list[Path] = Field(default_factory=list)
+
+
 class SimulationResult(BaseModel):
     status: RunStatus
     message: str
@@ -144,3 +191,6 @@ class SimulationResult(BaseModel):
     outputs: dict[str, float | str] = Field(default_factory=dict)
     evaluation: RequirementEvaluation | None = None
     artifacts: list[Path] = Field(default_factory=list)
+    iterations: list[IterationRecord] = Field(default_factory=list)
+    insight: CaseInsight | None = None
+    delivery_report: CaseDeliveryReport | None = None

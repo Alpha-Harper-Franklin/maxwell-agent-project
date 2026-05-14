@@ -14,6 +14,7 @@ from .config import Settings
 from .errors import RequirementPlanningError, UnknownPrimitiveError, UnsupportedRequirementError
 from .maxwell_ir import (
     GeneratedIRPlan,
+    IRPatch,
     IRAssignment,
     IRDerivedOutput,
     IRLocalValue,
@@ -22,6 +23,7 @@ from .maxwell_ir import (
     IRPostprocess,
     MaxwellIRPlan,
     IROperation,
+    apply_ir_patch,
     render_script_from_ir,
     validate_ir_plan,
 )
@@ -30,6 +32,7 @@ from .prompting import (
     build_design_feedback_instructions,
     build_intake_feedback_instructions,
     build_ir_feedback_instructions,
+    build_ir_patch_feedback_instructions,
     build_ir_generation_instructions,
     build_ir_repair_instructions,
     build_primitive_template_generation_instructions,
@@ -44,6 +47,7 @@ from .primitive_library import (
     PrimitiveTemplateObject,
     validate_primitive_template,
 )
+from .residuals import analyze_requirement_residuals, compact_residual_payload
 from .semantics import enrich_intake_semantics, infer_builder_hint, intake_has_generic_object_graph
 
 
@@ -1965,6 +1969,15 @@ def _validate_ir_artifact_payload(payload: dict[str, Any]) -> GeneratedIRPlan:
         raise RequirementPlanningError("AI 生成的 Maxwell IR 不符合结构约定。") from exc
     except ValueError as exc:
         raise RequirementPlanningError(f"AI 生成的 Maxwell IR 语义无效: {exc}") from exc
+
+
+def _validate_ir_patch_payload(payload: dict[str, Any]) -> IRPatch:
+    if not isinstance(payload, dict):
+        raise RequirementPlanningError("AI 生成的 IR 补丁不是 JSON 对象。")
+    try:
+        return IRPatch.model_validate(payload)
+    except ValidationError as exc:
+        raise RequirementPlanningError("AI 生成的 IR 补丁不符合结构约定。") from exc
 
 
 def _normalize_ir_artifact_payload(payload: dict[str, Any]) -> dict[str, Any]:
@@ -4622,6 +4635,66 @@ class CodexaLLMClient:
             )
             return _validate_ir_artifact_payload(result)
 
+    def revise_ir_patch_from_feedback(
+        self,
+        requirement: str,
+        intake: RequirementIntake,
+        previous_artifact: GeneratedIRPlan,
+        outputs: dict[str, float | str] | None,
+        evaluation: Any | None,
+        feedback_round: int,
+    ) -> IRPatch:
+        filtered_outputs = {
+            str(key): value
+            for key, value in (outputs or {}).items()
+            if isinstance(value, (str, float, int, bool))
+        }
+        residuals = compact_residual_payload(analyze_requirement_residuals(outputs or {}, evaluation))
+        payload = {
+            "requirement": requirement.strip(),
+            "current_intake": _compact_intake_for_ir_feedback(intake),
+            "current_ir_artifact": previous_artifact.model_dump(mode="json"),
+            "previous_outputs": filtered_outputs,
+            "previous_evaluation": _compact_feedback_evaluation(evaluation),
+            "residuals": residuals,
+            "feedback_round": feedback_round,
+            "hard_constraints": (
+                dict(intake.simulation_spec.get("constraints") or {})
+                if isinstance(intake.simulation_spec, dict)
+                else {}
+            ),
+            "allowed_patch_operations": [
+                "set_parameter_default",
+                "set_local_expression",
+                "set_object_material",
+                "add_warning",
+            ],
+        }
+        try:
+            result = self._call_json_fallback(
+                build_ir_patch_feedback_instructions(),
+                payload,
+                effort="medium",
+                timeout_s=max(20, min(self._settings.codexa_timeout_s, 45)),
+                max_attempts=1,
+            )
+            return _validate_ir_patch_payload(result)
+        except Exception as fallback_exc:
+            try:
+                result = self._call_json(
+                    build_ir_patch_feedback_instructions(),
+                    payload,
+                    IRPatch,
+                    effort="medium",
+                    timeout_s=max(20, min(self._settings.codexa_timeout_s, 45)),
+                    max_attempts=1,
+                )
+                return _validate_ir_patch_payload(result)
+            except Exception as strict_exc:
+                raise RequirementPlanningError(
+                    f"LLM IR patch revision failed. Fallback error: {fallback_exc}; strict-schema error: {strict_exc}"
+                ) from strict_exc
+
     def revise_ir_artifact_from_feedback(
         self,
         requirement: str,
@@ -4631,6 +4704,26 @@ class CodexaLLMClient:
         feedback_round: int,
     ) -> GeneratedIRPlan:
         previous_artifact = _build_ir_artifact_from_intake(intake)
+        try:
+            patch = self.revise_ir_patch_from_feedback(
+                requirement=requirement,
+                intake=intake,
+                previous_artifact=previous_artifact,
+                outputs=outputs,
+                evaluation=evaluation,
+                feedback_round=feedback_round,
+            )
+            patched_plan = apply_ir_patch(previous_artifact.ir_plan, patch)
+            summary = patch.summary or f"已根据第 {feedback_round} 轮仿真残差修订 Maxwell IR。"
+            return GeneratedIRPlan(
+                summary=summary,
+                ir_plan=patched_plan,
+                assumptions=list(previous_artifact.assumptions),
+                warnings=_merge_unique_strings(previous_artifact.warnings, patch.warnings, patch.expected_effects),
+            )
+        except Exception:
+            pass
+
         filtered_outputs = {
             str(key): value
             for key, value in (outputs or {}).items()
@@ -4642,6 +4735,7 @@ class CodexaLLMClient:
             "current_ir_artifact": previous_artifact.model_dump(mode="json"),
             "previous_outputs": filtered_outputs,
             "previous_evaluation": _compact_feedback_evaluation(evaluation),
+            "residuals": compact_residual_payload(analyze_requirement_residuals(outputs or {}, evaluation)),
             "feedback_round": feedback_round,
             "hard_constraints": (
                 dict(intake.simulation_spec.get("constraints") or {})
@@ -4831,6 +4925,20 @@ class CodexaLLMClient:
         payload = {
             "requirement": requirement.strip(),
             "current_design": intake.design.model_dump(mode="json"),
+            "patch_schema": {
+                "summary": "string or null",
+                "current_min_a": "number or null",
+                "current_a": "number or null",
+                "coil_turns": "integer or null",
+                "core_width_mm": "number or null",
+                "core_height_mm": "number or null",
+                "core_thickness_mm": "number or null",
+                "coil_width_mm": "number or null",
+                "coil_height_mm": "number or null",
+                "region_padding_mm": "number or null",
+                "assumptions": ["string"],
+                "warnings": ["string"],
+            },
             "hard_constraints": {
                 "supply_voltage_v": intake.design.supply_voltage_v,
                 "current_min_a": intake.design.current_min_a,
@@ -4851,28 +4959,13 @@ class CodexaLLMClient:
             result = self._call_json_fallback(
                 build_design_feedback_instructions(),
                 payload,
-                timeout_s=max(20, min(self._settings.codexa_timeout_s, 45)),
-                max_attempts=1,
+                timeout_s=max(90, self._settings.codexa_timeout_s),
+                max_attempts=2,
             )
             patch = _validate_design_patch_payload(result)
-            return _enforce_design_current_voltage_constraints(_apply_design_patch(intake.design, patch, requirement))
+            return _apply_design_patch(intake.design, patch, requirement)
         except Exception as fallback_exc:
-            try:
-                result = self._call_json(
-                    build_design_feedback_instructions(),
-                    payload,
-                    ElectromagnetDesignPatch,
-                    timeout_s=max(20, min(self._settings.codexa_timeout_s, 45)),
-                    max_attempts=1,
-                )
-                patch = _validate_design_patch_payload(result)
-                return _enforce_design_current_voltage_constraints(
-                    _apply_design_patch(intake.design, patch, requirement)
-                )
-            except Exception as strict_exc:
-                raise RequirementPlanningError(
-                    f"LLM feedback revision failed. Fallback error: {fallback_exc}; strict-schema error: {strict_exc}"
-                ) from strict_exc
+            raise RequirementPlanningError(f"LLM feedback revision failed. Fallback error: {fallback_exc}") from fallback_exc
 
     def revise_intake_from_feedback(
         self,
@@ -4882,7 +4975,7 @@ class CodexaLLMClient:
         evaluation: Any | None,
         feedback_round: int,
     ) -> RequirementIntake:
-        if infer_builder_hint(intake, requirement=requirement) == "electromagnet_2d" and intake.design is not None:
+        if intake.design is not None:
             revised_design = self.revise_design_from_feedback(
                 requirement=requirement,
                 intake=intake,
@@ -4914,6 +5007,7 @@ class CodexaLLMClient:
             _attach_ir_artifact_to_intake(revised_intake, revised_artifact)
             extracted = dict(revised_intake.extracted_parameters or {})
             extracted["feedback_round"] = feedback_round
+            extracted["last_ir_patch_summary"] = revised_artifact.summary
             if evaluation is not None and getattr(evaluation, "overall_status", None):
                 extracted["previous_overall_status"] = evaluation.overall_status
             revised_intake.extracted_parameters = _normalize_json_like(extracted)
@@ -4992,6 +5086,7 @@ class CodexaLLMClient:
         extracted.update(
             {
                 "feedback_round": feedback_round,
+                "last_ir_patch_summary": revised_design.summary or "已根据仿真反馈修正设计参数。",
                 "air_gap_mm": revised_design.air_gap_mm,
                 "current_a": revised_design.current_a,
                 "current_min_a": revised_design.current_min_a,

@@ -17,6 +17,7 @@ IRDerivedOutputPhase = Literal["before_solve", "after_solve"]
 IRDerivedOutputCast = Literal["float", "int", "str"]
 IRPostprocessKind = Literal["field_scalar", "matrix_export_value"]
 IRPostprocessCast = Literal["float", "str"]
+IRPatchOperation = Literal["set_parameter_default", "set_local_expression", "set_object_material", "add_warning"]
 
 
 class IRParameterBinding(BaseModel):
@@ -111,6 +112,20 @@ class GeneratedIRPlan(BaseModel):
     warnings: list[str] = Field(default_factory=list)
 
 
+class IRPatchAction(BaseModel):
+    operation: IRPatchOperation
+    target: str
+    value: float | int | str | bool | None = None
+    reason: str = ""
+
+
+class IRPatch(BaseModel):
+    summary: str = ""
+    actions: list[IRPatchAction] = Field(default_factory=list)
+    expected_effects: list[str] = Field(default_factory=list)
+    warnings: list[str] = Field(default_factory=list)
+
+
 def validate_ir_plan(plan: MaxwellIRPlan) -> MaxwellIRPlan:
     parameter_names = {item.name for item in plan.parameters}
     local_names = {item.name for item in plan.locals}
@@ -150,6 +165,46 @@ def validate_ir_plan(plan: MaxwellIRPlan) -> MaxwellIRPlan:
                 raise ValueError(f"IR postprocess references unknown matrix assignment: {matrix_name}")
 
     return plan
+
+
+def apply_ir_patch(plan: MaxwellIRPlan, patch: IRPatch) -> MaxwellIRPlan:
+    payload = plan.model_dump(mode="json")
+    for action in patch.actions:
+        if action.operation == "set_parameter_default":
+            _set_parameter_default(payload, action.target, action.value)
+        elif action.operation == "set_local_expression":
+            _set_local_expression(payload, action.target, str(action.value or "0"))
+        elif action.operation == "set_object_material":
+            _set_object_material(payload, action.target, str(action.value or "vacuum"))
+        elif action.operation == "add_warning":
+            continue
+        else:  # pragma: no cover - pydantic prevents this path.
+            raise ValueError(f"Unsupported IR patch operation: {action.operation}")
+    return validate_ir_plan(MaxwellIRPlan.model_validate(payload))
+
+
+def _set_parameter_default(payload: dict[str, Any], target: str, value: float | int | str | bool | None) -> None:
+    for item in payload.get("parameters") or []:
+        if isinstance(item, dict) and item.get("name") == target:
+            item["default"] = value
+            return
+    raise ValueError(f"IR patch references unknown parameter: {target}")
+
+
+def _set_local_expression(payload: dict[str, Any], target: str, value: str) -> None:
+    for item in payload.get("locals") or []:
+        if isinstance(item, dict) and item.get("name") == target:
+            item["expression"] = value
+            return
+    raise ValueError(f"IR patch references unknown local value: {target}")
+
+
+def _set_object_material(payload: dict[str, Any], target: str, value: str) -> None:
+    for item in payload.get("objects") or []:
+        if isinstance(item, dict) and item.get("name") == target:
+            item["material"] = value
+            return
+    raise ValueError(f"IR patch references unknown object: {target}")
 
 
 def render_script_from_ir(

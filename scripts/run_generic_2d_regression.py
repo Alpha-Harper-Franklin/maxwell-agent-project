@@ -6,6 +6,7 @@ import subprocess
 import sys
 from datetime import datetime
 from pathlib import Path
+from uuid import uuid4
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -131,7 +132,7 @@ def main() -> int:
         print(json.dumps({"error": "no matching cases"}, ensure_ascii=False))
         return 2
 
-    timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    timestamp = f"{datetime.now().strftime('%Y%m%d-%H%M%S')}-{uuid4().hex[:6]}"
     summary_dir = PROJECT_ROOT / "artifacts" / f"generic_2d_regression_{timestamp}"
     summary_dir.mkdir(parents=True, exist_ok=True)
     summary_path = summary_dir / "summary.json"

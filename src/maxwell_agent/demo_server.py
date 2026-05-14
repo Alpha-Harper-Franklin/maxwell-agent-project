@@ -1,10 +1,10 @@
 from __future__ import annotations
 
-import json
 from dataclasses import dataclass, field
 from datetime import datetime
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+import json
 from threading import Lock, Thread
 from typing import Any
 from urllib.parse import parse_qs
@@ -30,8 +30,7 @@ class DemoJobState:
     bundle: DemoBundle | None = None
 
     def push(self, message: str) -> None:
-        stamp = _now_text()
-        entry = f"{stamp} {message}"
+        entry = f"{_now_text()} {message}"
         if not self.timeline or self.timeline[-1] != entry:
             self.timeline.append(entry)
 
@@ -99,7 +98,6 @@ def serve_demo(agent: MaxwellAgent, host: str, port: int) -> None:
                 bundle = self.job.bundle
                 if not bundle and self.job.state == "idle":
                     bundle = self.last_bundle
-
                 return {
                     "state": self.job.state,
                     "progress": self.job.progress,
@@ -108,30 +106,31 @@ def serve_demo(agent: MaxwellAgent, host: str, port: int) -> None:
                     "started_at": self.job.started_at,
                     "finished_at": self.job.finished_at,
                     "error_message": self.job.error_message,
-                    "timeline": list(self.job.timeline[-8:]),
+                    "timeline": list(self.job.timeline[-10:]),
                     "bundle_html": bundle.to_html_document(page_title="Maxwell 智能体运行结果") if bundle else "",
                     "bundle_status": bundle.status if bundle else "",
                     "bundle_message": bundle.message if bundle else "",
                     "run_directory": str(bundle.run_directory) if bundle else "",
                     "project_file": str(bundle.project_file) if bundle and bundle.project_file else "",
                     "summary_html_path": str(bundle.summary_html_path) if bundle and bundle.summary_html_path else "",
+                    "case_report_html_path": str(bundle.case_report_html_path)
+                    if bundle and bundle.case_report_html_path
+                    else "",
+                    "case_report_markdown_path": str(bundle.case_report_markdown_path)
+                    if bundle and bundle.case_report_markdown_path
+                    else "",
                 }
 
         def run_job_async(self, requirement: str) -> None:
             def worker() -> None:
                 try:
-                    bundle = execute_demo(
-                        self.agent,
-                        requirement,
-                        progress_callback=self.update_progress,
-                    )
+                    bundle = execute_demo(self.agent, requirement, progress_callback=self.update_progress)
                 except Exception as exc:  # pragma: no cover
                     self.fail_job(requirement, str(exc))
                     return
                 self.finish_job(bundle)
 
-            thread = Thread(target=worker, name="maxwell-demo-job", daemon=True)
-            thread.start()
+            Thread(target=worker, name="maxwell-demo-job", daemon=True).start()
 
     class DemoRequestHandler(BaseHTTPRequestHandler):
         server: DemoHTTPServer
@@ -153,20 +152,15 @@ def serve_demo(agent: MaxwellAgent, host: str, port: int) -> None:
 
             content_length = int(self.headers.get("Content-Length", "0"))
             body = self.rfile.read(content_length).decode("utf-8", errors="ignore")
-            form = parse_qs(body)
-            requirement = form.get("requirement", [""])[0].strip()
-
+            requirement = parse_qs(body).get("requirement", [""])[0].strip()
             if not requirement:
-                self._write_json(
-                    {"accepted": False, "error": "请输入需求后再运行。"},
-                    status=HTTPStatus.BAD_REQUEST,
-                )
+                self._write_json({"accepted": False, "error": "请输入需求后再运行。"}, status=HTTPStatus.BAD_REQUEST)
                 return
 
             if not self.server.run_lock.acquire(blocking=False):
                 payload = self.server.status_payload()
                 payload["accepted"] = False
-                payload["error"] = "当前已有一个 Maxwell 任务正在运行。请等待本次计算完成后再提交。"
+                payload["error"] = "当前已有一个 Maxwell 任务正在运行，请等待本次计算完成后再提交。"
                 self._write_json(payload, status=HTTPStatus.CONFLICT)
                 return
 
@@ -222,7 +216,6 @@ def _render_page() -> str:
   <title>Maxwell 智能体演示</title>
   <style>
     :root {
-      --bg: #f3ecde;
       --paper: #fffdf8;
       --text: #152018;
       --muted: #5c665f;
@@ -240,56 +233,26 @@ def _render_page() -> str:
       background: linear-gradient(180deg, #f7f0e2 0%, #efe5d4 100%);
       min-height: 100vh;
     }
-    .shell {
-      width: min(1180px, calc(100vw - 32px));
-      margin: 24px auto 40px;
-    }
+    .shell { width: min(1180px, calc(100vw - 32px)); margin: 24px auto 40px; }
     .hero {
       padding: 30px 32px;
-      border-radius: 20px;
+      border-radius: 14px;
       background: linear-gradient(135deg, rgba(23, 58, 47, 0.98), rgba(31, 94, 74, 0.95));
       color: #f8f3ea;
       box-shadow: var(--shadow);
     }
     h1, h2, p { margin: 0; }
-    h1 { font-size: clamp(30px, 4vw, 44px); font-weight: 800; }
-    .hero p {
-      margin-top: 12px;
-      max-width: 900px;
-      line-height: 1.72;
-      color: rgba(248, 243, 234, 0.92);
-    }
-    .grid {
-      margin-top: 18px;
-      display: grid;
-      grid-template-columns: minmax(320px, 430px) minmax(0, 1fr);
-      gap: 18px;
-      align-items: start;
-    }
-    .card {
-      background: var(--paper);
-      border: 1px solid var(--line);
-      border-radius: 14px;
-      padding: 22px;
-      box-shadow: var(--shadow);
-    }
-    .card h2 {
-      color: var(--accent);
-      font-size: 18px;
-      margin-bottom: 12px;
-    }
-    .field-label {
-      display: block;
-      font-size: 13px;
-      color: var(--muted);
-      margin-bottom: 8px;
-      line-height: 1.6;
-    }
+    h1 { font-size: clamp(28px, 4vw, 42px); font-weight: 800; }
+    .hero p { margin-top: 12px; max-width: 920px; line-height: 1.72; color: rgba(248, 243, 234, 0.92); }
+    .grid { margin-top: 18px; display: grid; grid-template-columns: minmax(320px, 430px) minmax(0, 1fr); gap: 18px; align-items: start; }
+    .card { background: var(--paper); border: 1px solid var(--line); border-radius: 10px; padding: 22px; box-shadow: var(--shadow); }
+    .card h2 { color: var(--accent); font-size: 18px; margin-bottom: 12px; }
+    .field-label { display: block; font-size: 13px; color: var(--muted); margin-bottom: 8px; line-height: 1.6; }
     textarea {
       width: 100%;
       min-height: 220px;
       border: 1px solid var(--line);
-      border-radius: 10px;
+      border-radius: 8px;
       padding: 14px;
       resize: vertical;
       font: inherit;
@@ -300,7 +263,7 @@ def _render_page() -> str:
       margin-top: 14px;
       width: 100%;
       border: none;
-      border-radius: 10px;
+      border-radius: 8px;
       padding: 14px 16px;
       font: inherit;
       font-weight: 700;
@@ -309,133 +272,30 @@ def _render_page() -> str:
       cursor: pointer;
     }
     button:hover { filter: brightness(1.03); }
-    button[disabled] {
-      cursor: not-allowed;
-      opacity: 0.72;
-      filter: grayscale(0.12);
-    }
-    .hint {
-      margin-top: 12px;
-      color: var(--muted);
-      line-height: 1.65;
-      font-size: 13px;
-    }
-    .status-panel {
-      margin-top: 18px;
-      padding: 16px;
-      border-radius: 12px;
-      background: rgba(31, 94, 74, 0.08);
-      border: 1px solid rgba(31, 94, 74, 0.14);
-    }
-    .status-line {
-      display: flex;
-      justify-content: space-between;
-      gap: 12px;
-      align-items: center;
-      font-size: 14px;
-      font-weight: 700;
-      color: var(--accent);
-    }
-    .progress-track {
-      margin-top: 12px;
-      width: 100%;
-      height: 12px;
-      border-radius: 999px;
-      background: var(--track);
-      overflow: hidden;
-    }
-    .progress-bar {
-      width: 0%;
-      height: 100%;
-      border-radius: 999px;
-      background: linear-gradient(90deg, var(--accent), #36a17b);
-      transition: width 0.35s ease;
-    }
-    .meta {
-      margin-top: 10px;
-      color: var(--muted);
-      font-size: 13px;
-      line-height: 1.6;
-      word-break: break-word;
-    }
-    .timeline {
-      margin-top: 12px;
-      padding-left: 18px;
-      color: var(--muted);
-      line-height: 1.7;
-      font-size: 13px;
-    }
-    .timeline li:last-child {
-      color: var(--text);
-      font-weight: 600;
-    }
-    .error-box {
-      margin-top: 14px;
-      border-radius: 10px;
-      padding: 12px 14px;
-      background: rgba(181, 95, 48, 0.12);
-      color: #8b4323;
-      line-height: 1.6;
-      font-weight: 600;
-      display: none;
-    }
-    .result-head {
-      display: flex;
-      gap: 12px;
-      align-items: center;
-      flex-wrap: wrap;
-      margin-bottom: 12px;
-    }
-    .pill {
-      display: inline-flex;
-      border-radius: 999px;
-      padding: 7px 12px;
-      font-weight: 700;
-      font-size: 13px;
-      background: rgba(31, 94, 74, 0.12);
-      color: var(--accent);
-    }
-    .pill.warn {
-      background: rgba(181, 95, 48, 0.12);
-      color: var(--warn);
-    }
-    .result-frame {
-      border: 1px solid var(--line);
-      border-radius: 12px;
-      overflow: hidden;
-      background: #fff;
-      min-height: 720px;
-    }
-    iframe {
-      border: none;
-      width: 100%;
-      min-height: 720px;
-      background: #fff;
-    }
-    .placeholder {
-      border: 1px dashed var(--line);
-      border-radius: 12px;
-      min-height: 720px;
-      padding: 24px;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      color: var(--muted);
-      line-height: 1.8;
-      background: rgba(255, 253, 248, 0.72);
-      text-align: center;
-    }
-    @media (max-width: 920px) {
-      .grid { grid-template-columns: 1fr; }
-      .result-frame, iframe, .placeholder { min-height: 580px; }
-    }
+    button[disabled] { cursor: not-allowed; opacity: 0.72; filter: grayscale(0.12); }
+    .hint { margin-top: 12px; color: var(--muted); line-height: 1.65; font-size: 13px; }
+    .status-panel { margin-top: 18px; padding: 16px; border-radius: 10px; background: rgba(31, 94, 74, 0.08); border: 1px solid rgba(31, 94, 74, 0.14); }
+    .status-line { display: flex; justify-content: space-between; gap: 12px; align-items: center; font-size: 14px; font-weight: 700; color: var(--accent); }
+    .progress-track { margin-top: 12px; width: 100%; height: 12px; border-radius: 999px; background: var(--track); overflow: hidden; }
+    .progress-bar { width: 0%; height: 100%; border-radius: 999px; background: linear-gradient(90deg, var(--accent), #36a17b); transition: width 0.35s ease; }
+    .meta { margin-top: 10px; color: var(--muted); font-size: 13px; line-height: 1.6; word-break: break-word; }
+    .timeline { margin-top: 12px; padding-left: 18px; color: var(--muted); line-height: 1.7; font-size: 13px; }
+    .timeline li:last-child { color: var(--text); font-weight: 600; }
+    .error-box { margin-top: 14px; border-radius: 8px; padding: 12px 14px; background: rgba(181, 95, 48, 0.12); color: #8b4323; line-height: 1.6; font-weight: 600; display: none; }
+    .result-head { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; margin-bottom: 12px; }
+    .pill { display: inline-flex; border-radius: 999px; padding: 7px 12px; font-weight: 700; font-size: 13px; background: rgba(31, 94, 74, 0.12); color: var(--accent); }
+    .pill.warn { background: rgba(181, 95, 48, 0.12); color: var(--warn); }
+    .result-frame { border: 1px solid var(--line); border-radius: 10px; overflow: hidden; background: #fff; min-height: 720px; }
+    iframe { border: none; width: 100%; min-height: 720px; background: #fff; }
+    .placeholder { border: 1px dashed var(--line); border-radius: 10px; min-height: 720px; padding: 24px; display: flex; align-items: center; justify-content: center; color: var(--muted); line-height: 1.8; background: rgba(255, 253, 248, 0.72); text-align: center; }
+    @media (max-width: 920px) { .grid { grid-template-columns: 1fr; } .result-frame, iframe, .placeholder { min-height: 580px; } }
   </style>
 </head>
 <body>
   <div class="shell">
     <section class="hero">
       <h1>Maxwell 智能体演示</h1>
-      <p>输入一句工程需求，系统会自动解析需求、调用本地 Maxwell 2D 建模求解，并把结果与约束判定显示出来。页面采用轮询进度条，避免长时间请求卡住浏览器。</p>
+      <p>输入一句工程需求，系统会调用云端大模型整理规格，本地自动执行 Maxwell 2D，并把每轮迭代、约束满足情况、几何识别和单案例交付报告展示出来。</p>
     </section>
 
     <div class="grid">
@@ -448,10 +308,7 @@ def _render_page() -> str:
         </form>
         <div id="error-box" class="error-box"></div>
         <div class="hint">
-          说明:
-          <br>1. 提交后页面会立即返回，通过进度条显示当前阶段。
-          <br>2. 运行期间不要重复点击，也不要同时打开多个页面提交任务。
-          <br>3. 结果文件会保存到项目的 workspace 目录。
+          提交后页面会立即返回，进度条会轮询显示当前阶段。运行期间不要重复提交，结果文件会保存到项目 workspace 目录。
         </div>
 
         <div class="status-panel">
@@ -459,9 +316,7 @@ def _render_page() -> str:
             <span id="status-stage">等待任务</span>
             <span id="status-percent">0%</span>
           </div>
-          <div class="progress-track">
-            <div id="progress-bar" class="progress-bar"></div>
-          </div>
+          <div class="progress-track"><div id="progress-bar" class="progress-bar"></div></div>
           <div id="status-meta" class="meta">当前没有运行中的任务。</div>
           <ul id="timeline" class="timeline"></ul>
         </div>
@@ -495,7 +350,6 @@ def _render_page() -> str:
     const resultMetaEl = document.getElementById("result-meta");
     const resultFrame = document.getElementById("result-frame");
     const resultPlaceholder = document.getElementById("result-placeholder");
-
     let pollTimer = null;
 
     function setBusy(busy) {
@@ -503,17 +357,10 @@ def _render_page() -> str:
       runButton.disabled = busy;
       runButton.textContent = busy ? "运行中，请等待..." : "开始运行";
     }
-
     function showError(message) {
-      if (!message) {
-        errorBox.style.display = "none";
-        errorBox.textContent = "";
-        return;
-      }
-      errorBox.style.display = "block";
-      errorBox.textContent = message;
+      errorBox.style.display = message ? "block" : "none";
+      errorBox.textContent = message || "";
     }
-
     function renderTimeline(items) {
       timelineEl.innerHTML = "";
       for (const item of items || []) {
@@ -522,7 +369,6 @@ def _render_page() -> str:
         timelineEl.appendChild(li);
       }
     }
-
     function renderResult(payload) {
       if (payload.bundle_html) {
         resultFrame.srcdoc = payload.bundle_html;
@@ -533,79 +379,50 @@ def _render_page() -> str:
         resultFrame.style.display = "none";
         resultPlaceholder.style.display = "flex";
       }
-
       const state = payload.state || "idle";
-      const pillWarn = state !== "completed" && state !== "idle";
-      pillEl.className = pillWarn ? "pill warn" : "pill";
+      pillEl.className = state !== "completed" && state !== "idle" ? "pill warn" : "pill";
       pillEl.textContent = state === "completed" ? "已完成" :
         state === "running" ? "运行中" :
         state === "failed" ? "失败" :
         state === "blocked" ? "阻塞" : "等待结果";
-
       const parts = [];
-      if (payload.run_directory) {
-        parts.push("运行目录: " + payload.run_directory);
-      }
-      if (payload.summary_html_path) {
-        parts.push("摘要文件: " + payload.summary_html_path);
-      }
+      if (payload.run_directory) parts.push("运行目录: " + payload.run_directory);
+      if (payload.case_report_html_path) parts.push("单案例报告: " + payload.case_report_html_path);
+      if (payload.summary_html_path) parts.push("摘要: " + payload.summary_html_path);
       resultMetaEl.textContent = parts.join(" | ");
     }
-
     function renderStatus(payload) {
       const progress = Number(payload.progress || 0);
       stageEl.textContent = payload.stage || "等待任务";
       percentEl.textContent = progress + "%";
       progressBar.style.width = progress + "%";
-
       const metaParts = [];
-      if (payload.requirement) {
-        metaParts.push("当前需求: " + payload.requirement);
-      }
-      if (payload.started_at) {
-        metaParts.push("开始时间: " + payload.started_at);
-      }
-      if (payload.finished_at) {
-        metaParts.push("结束时间: " + payload.finished_at);
-      }
+      if (payload.requirement) metaParts.push("当前需求: " + payload.requirement);
+      if (payload.started_at) metaParts.push("开始时间: " + payload.started_at);
+      if (payload.finished_at) metaParts.push("结束时间: " + payload.finished_at);
       metaEl.textContent = metaParts.join(" | ") || "当前没有运行中的任务。";
-
       renderTimeline(payload.timeline || []);
       renderResult(payload);
-
       const running = payload.state === "running";
       setBusy(running);
-      if (!running && payload.error_message) {
-        showError(payload.error_message);
-      }
-      if (!running && !payload.error_message) {
-        showError("");
-      }
-
+      showError(!running ? payload.error_message || "" : "");
       if (!running && pollTimer) {
         clearInterval(pollTimer);
         pollTimer = null;
       }
     }
-
     async function fetchStatus() {
       const response = await fetch("/status", { cache: "no-store" });
       const payload = await response.json();
       renderStatus(payload);
       return payload;
     }
-
     function startPolling() {
-      if (pollTimer) {
-        return;
-      }
+      if (pollTimer) return;
       pollTimer = setInterval(() => {
-        fetchStatus().catch((error) => {
-          showError("状态轮询失败: " + error.message);
-        });
+        fetchStatus().catch((error) => showError("状态轮询失败: " + error.message));
       }, 1000);
     }
-
     form.addEventListener("submit", async (event) => {
       event.preventDefault();
       const requirement = requirementField.value.trim();
@@ -613,13 +430,10 @@ def _render_page() -> str:
         showError("请输入需求后再运行。");
         return;
       }
-
       showError("");
       setBusy(true);
-
       const body = new URLSearchParams();
       body.set("requirement", requirement);
-
       try {
         const response = await fetch("/run", {
           method: "POST",
@@ -628,23 +442,15 @@ def _render_page() -> str:
         });
         const payload = await response.json();
         renderStatus(payload);
-        if (!response.ok && payload.error) {
-          showError(payload.error);
-        }
-        if (response.status === 202) {
-          startPolling();
-        } else {
-          setBusy(false);
-        }
+        if (!response.ok && payload.error) showError(payload.error);
+        if (response.status === 202) startPolling();
+        else setBusy(false);
       } catch (error) {
         setBusy(false);
         showError("启动任务失败: " + error.message);
       }
     });
-
-    fetchStatus().catch((error) => {
-      showError("初始化状态失败: " + error.message);
-    });
+    fetchStatus().catch((error) => showError("初始化状态失败: " + error.message));
   </script>
 </body>
 </html>"""

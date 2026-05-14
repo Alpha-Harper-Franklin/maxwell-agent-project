@@ -91,6 +91,8 @@ def main() -> None:
             console.print(f"\nText summary: {bundle.summary_text_path}", markup=False)
         if bundle.summary_html_path:
             console.print(f"HTML summary: {bundle.summary_html_path}", markup=False)
+        if bundle.case_report_html_path:
+            console.print(f"Case delivery report: {bundle.case_report_html_path}", markup=False)
         return
 
     if args.command == "serve":

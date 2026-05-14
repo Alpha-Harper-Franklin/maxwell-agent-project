@@ -1,7 +1,9 @@
 from pathlib import Path
 
 from maxwell_agent.config import Settings
+from maxwell_agent.capability_graph import capability_graph_for_intake
 from maxwell_agent.evaluation import build_requirement_evaluation
+from maxwell_agent.experience import ExperienceStore, FailureExperience
 from maxwell_agent.llm_client import (
     _apply_ir_parameter_defaults_to_intake,
     _apply_design_patch,
@@ -31,14 +33,22 @@ from maxwell_agent.llm_client import (
 from maxwell_agent.maxwell_env import _normalize_version_hint
 from maxwell_agent.pyaedt_compat import normalize_aedt_version_for_float, normalize_openai_base_url
 from maxwell_agent.primitive_library import PrimitiveLibrary, PrimitiveTemplate
-from maxwell_agent.maxwell_ir import GeneratedIRPlan, MaxwellIRPlan
+from maxwell_agent.maxwell_ir import GeneratedIRPlan, IRPatch, MaxwellIRPlan, apply_ir_patch
 from maxwell_agent.maxwell_executor import MaxwellExecutor
-from maxwell_agent.models import ElectromagnetDesign, ElectromagnetDesignPatch, GeneratedMaxwellScript, RequirementIntake
+from maxwell_agent.models import (
+    ElectromagnetDesign,
+    ElectromagnetDesignPatch,
+    GeneratedMaxwellScript,
+    RequirementCheck,
+    RequirementEvaluation,
+    RequirementIntake,
+)
 from maxwell_agent.errors import UnknownPrimitiveError
 from maxwell_agent.script_validation import static_check_generated_script
 from maxwell_agent.agent import MaxwellAgent
 from maxwell_agent.primitive_library import PrimitiveTemplateArtifact
 from maxwell_agent.semantics import infer_builder_hint
+from maxwell_agent.residuals import analyze_requirement_residuals, compact_residual_payload
 
 
 def test_design_variable_expressions() -> None:
@@ -844,6 +854,105 @@ def test_validate_ir_artifact_payload_accepts_valid_generic_ir() -> None:
     assert artifact.assumptions == ["按二维截面处理"]
 
 
+def test_capability_graph_reads_ir_instead_of_business_template() -> None:
+    intake = RequirementIntake(
+        task_family="unknown",
+        supported_now=True,
+        simulation_spec={"physics_type": "magnetostatic_2d"},
+        execution_plan={},
+    )
+    _attach_ir_artifact_to_intake(
+        intake,
+        GeneratedIRPlan(
+            summary="IR 能力图测试",
+            ir_plan=MaxwellIRPlan(
+                design_name="CapabilityGraphDemo",
+                solution_type="Magnetostatic",
+                setup_type="Magnetostatic",
+                objects=[
+                    {"name": "bar", "kind": "rectangle", "material": "copper", "origin_exprs": ["-5", "-1", "0"], "sizes_exprs": ["10", "2"]},
+                    {"name": "region", "kind": "region", "pad_value_exprs": ["20", "20", "20", "20"]},
+                ],
+                assignments=[
+                    {"name": "drive", "kind": "current", "targets": ["bar"], "amplitude_expr": "100"},
+                    {"name": "outer", "kind": "balloon", "targets": ["region"], "boundary_name": "outer"},
+                ],
+                postprocess=[
+                    {"kind": "field_scalar", "output_key": "max_flux_density_t", "quantity": "Mag_B", "scalar_function": "Maximum"}
+                ],
+            ),
+        ),
+    )
+
+    keys = {item["key"] for item in capability_graph_for_intake(intake, "二维载流导体，输出磁密。")}
+
+    assert "physics.magnetostatic_2d" in keys
+    assert "geometry.rectangle" in keys
+    assert "assignment.current" in keys
+    assert "output.field_scalar" in keys
+
+
+def test_residual_parser_quantifies_failed_constraint() -> None:
+    evaluation = RequirementEvaluation(
+        overall_status="failed",
+        summary="电流密度超限。",
+        checks=[RequirementCheck(name="电流密度上限", status="failed", detail="10 A/mm^2 > 5 A/mm^2")],
+    )
+
+    residuals = analyze_requirement_residuals({"estimated_current_density_a_per_mm2": 10.0}, evaluation)
+    compact = compact_residual_payload(residuals)
+
+    assert compact[0]["actual"] == 10.0
+    assert compact[0]["target"] == 5.0
+    assert compact[0]["relation"] == "<="
+    assert compact[0]["relative_error"] == 1.0
+    assert "geometry.width_mm" in compact[0]["suggested_ir_targets"]
+
+
+def test_apply_ir_patch_changes_existing_ir_parameter_only() -> None:
+    plan = MaxwellIRPlan(
+        design_name="PatchDemo",
+        solution_type="Magnetostatic",
+        setup_type="Magnetostatic",
+        parameters=[
+            {"name": "width_mm", "source": "geometry", "field": "width_mm", "default": 10.0},
+            {"name": "current_a", "source": "excitations", "field": "current_a", "default": 200.0},
+        ],
+        objects=[
+            {"name": "bar", "kind": "rectangle", "material": "copper", "origin_exprs": ["-width_mm/2", "-1", "0"], "sizes_exprs": ["width_mm", "2"]},
+        ],
+        assignments=[{"name": "drive", "kind": "current", "targets": ["bar"], "amplitude_expr": "current_a"}],
+    )
+    patch = IRPatch(
+        summary="扩大宽度",
+        actions=[{"operation": "set_parameter_default", "target": "width_mm", "value": 20.0, "reason": "电流密度超限"}],
+    )
+
+    revised = apply_ir_patch(plan, patch)
+
+    assert next(item.default for item in revised.parameters if item.name == "width_mm") == 20.0
+    assert next(item.default for item in revised.parameters if item.name == "current_a") == 200.0
+
+
+def test_experience_store_appends_and_loads_feedback_record(tmp_path: Path) -> None:
+    store = ExperienceStore(tmp_path / "failure_experience.json")
+    store.append(
+        FailureExperience(
+            requirement="做一根载流铜排",
+            run_directory=str(tmp_path),
+            stage="constraint_feedback",
+            failed_checks=["10 A/mm^2 > 5 A/mm^2"],
+            resolved=False,
+        )
+    )
+
+    records = store.load()
+
+    assert len(records) == 1
+    assert records[0].requirement == "做一根载流铜排"
+    assert records[0].failed_checks == ["10 A/mm^2 > 5 A/mm^2"]
+
+
 def test_validate_ir_artifact_payload_adapts_loose_llm_style_ir() -> None:
     artifact = _validate_ir_artifact_payload(
         {
@@ -1126,6 +1235,34 @@ def test_revise_intake_from_feedback_prefers_ir_revision_path() -> None:
     assert revised.simulation_spec["ir_plan"]["design_name"] == "RevisedBusbarIR"
     assert revised.simulation_spec["geometry"]["width_mm"] == 20.0
     assert revised.simulation_spec["excitations"]["current_a"] == 200.0
+    assert revised.extracted_parameters["feedback_round"] == 1
+
+
+def test_design_feedback_path_depends_on_design_object_not_helper_label() -> None:
+    client = object.__new__(CodexaLLMClient)
+    intake = _fallback_intake_from_requirement("做一个24V直流电磁铁，气隙2mm，电流不超过2A。")
+    assert intake.design is not None
+    intake.task_family = "unknown"
+
+    revised_design = intake.design.model_copy(update={"coil_turns": 1200, "summary": "LLM 已增大匝数降低 24V 下电流。"})
+    client.revise_design_from_feedback = lambda **kwargs: revised_design
+
+    revised = CodexaLLMClient.revise_intake_from_feedback(
+        client,
+        requirement="做一个24V直流电磁铁，气隙2mm，电流不超过2A。",
+        intake=intake,
+        outputs={"estimated_current_at_supply_a": 14.9},
+        evaluation=RequirementEvaluation(
+            overall_status="failed",
+            summary="电压电流联合约束失败",
+            checks=[RequirementCheck(name="电压/电流联合约束", status="failed", detail="约14.9A，不超过2A")],
+        ),
+        feedback_round=1,
+    )
+
+    assert revised.design is not None
+    assert revised.design.coil_turns == 1200
+    assert revised.task_family == "electromagnet_2d"
     assert revised.extracted_parameters["feedback_round"] == 1
 
 
