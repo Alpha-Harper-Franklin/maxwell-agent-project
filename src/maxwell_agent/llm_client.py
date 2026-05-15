@@ -63,6 +63,11 @@ def _extract_json_blob(text: str) -> str:
     return text[start : end + 1]
 
 
+def _as_response_input(input_payload: Any) -> list[dict[str, str]]:
+    content = input_payload if isinstance(input_payload, str) else json.dumps(input_payload, ensure_ascii=False)
+    return [{"role": "user", "content": content}]
+
+
 def _normalize_task_family(value: Any) -> str:
     text = str(value or "").strip().lower()
     if not text:
@@ -4445,7 +4450,7 @@ class CodexaLLMClient:
         response = self._create_response_with_retry(
             model=self._settings.codexa_model,
             instructions=instructions,
-            input=json.dumps(input_payload, ensure_ascii=False) if not isinstance(input_payload, str) else input_payload,
+            input=_as_response_input(input_payload),
             text={"format": schema},
             reasoning={"effort": reasoning_effort},
             store=False,
@@ -4466,7 +4471,7 @@ class CodexaLLMClient:
         response = self._create_response_with_retry(
             model=self._settings.codexa_model,
             instructions=instructions,
-            input=json.dumps(input_payload, ensure_ascii=False) if not isinstance(input_payload, str) else input_payload,
+            input=_as_response_input(input_payload),
             reasoning={"effort": reasoning_effort},
             store=False,
             timeout=timeout_s or self._settings.codexa_timeout_s,
@@ -4526,17 +4531,6 @@ class CodexaLLMClient:
 
     def generate_requirement_intake(self, requirement: str) -> RequirementIntake:
         requirement = requirement.strip()
-        if (
-            _looks_like_annular_conductor_requirement(requirement)
-            or _looks_like_coaxial_capacitor_requirement(requirement)
-            or _looks_like_capacitor_requirement(requirement)
-            or _looks_like_busbar_requirement(requirement)
-            or _looks_like_solenoid_requirement(requirement)
-            or _looks_like_transformer_requirement(requirement)
-            or _looks_like_inductor_requirement(requirement)
-            or _looks_like_electromagnet_requirement(requirement)
-        ):
-            return _fallback_intake_from_requirement(requirement)
         try:
             payload = self._call_json(
                 build_requirement_structuring_instructions(),
